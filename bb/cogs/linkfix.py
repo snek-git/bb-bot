@@ -89,12 +89,37 @@ def choose_quip(
     """
     if rerun_line:
         return rerun_line
+    if settings.rare_text and settings.rare_rate > 0 and rng.randrange(settings.rare_rate) == 0:
+        return rare_line(settings)
     if settings.quip_rate <= 0 or rng.randrange(settings.quip_rate) != 0:
         return None
     flavor = settings.channel_flavor(channel_id) if channel_id is not None else None
     if flavor:
         return strings.line(f"quip.{flavor}", site=site_name)
     return strings.line("quip.fix", site=site_name)
+
+
+def rare_line(settings: GuildSettings) -> str:
+    """The custom rare line, with {target} replaced by a ping (put first if the text has no {target})."""
+    text = settings.rare_text.strip()
+    if not settings.rare_target_id:
+        return text.replace("{target}", "").strip()
+    ping = f"<@{settings.rare_target_id}>"
+    return text.replace("{target}", ping) if "{target}" in text else f"{ping} {text}"
+
+
+def pings_target(settings: GuildSettings, text: str | None) -> bool:
+    return bool(settings.rare_target_id and text and f"<@{settings.rare_target_id}>" in text)
+
+
+def send_mentions(settings: GuildSettings, text: str | None, *, reply: bool) -> discord.AllowedMentions:
+    """Nobody gets pinged by BB, except the rare line's target (and the poster in ping mode)."""
+    mentions = discord.AllowedMentions.none()
+    if reply and not settings.silent:
+        mentions.replied_user = True
+    if pings_target(settings, text):
+        mentions.users = [discord.Object(settings.rare_target_id)]
+    return mentions
 
 
 def settle_quip(current: str | None, *, is_rerun: bool, outcome: Literal["uploaded", "failed"]) -> str:
@@ -443,10 +468,28 @@ class LinkFix(commands.Cog):
         *,
         quip_channel: int,
     ) -> LiveRepost | None:
-        quip = choose_quip(
-            settings, rerun_line=rerun_line, site_name=m.site.name, channel_id=quip_channel
+        quip = await self._choose_quip(
+            message, settings, rerun_line=rerun_line, site_name=m.site.name, channel_id=quip_channel
         )
         return await self._send_repost(message, settings, m, quip, is_rerun=rerun_line is not None)
+
+    async def _choose_quip(
+        self,
+        message: discord.Message,
+        settings: GuildSettings,
+        *,
+        rerun_line: str | None,
+        site_name: str,
+        channel_id: int,
+    ) -> str | None:
+        """choose_quip, plus the armed rare line: used once on the next link (not over a repost roast)."""
+        guild = message.guild
+        if guild is not None and not rerun_line:
+            current = await self.bot.settings.get(guild.id)  # fresh: an earlier link may have used it
+            if current.rare_armed and current.rare_text:
+                await self.bot.settings.update(guild.id, rare_armed=False)
+                return rare_line(current)
+        return choose_quip(settings, rerun_line=rerun_line, site_name=site_name, channel_id=channel_id)
 
     async def _settle_all(self, live: list[LiveRepost]) -> list[str]:
         results = await asyncio.gather(*(self._settle(r) for r in live), return_exceptions=True)
@@ -705,12 +748,12 @@ class LinkFix(commands.Cog):
                 site=ehentai.SITE_ID,
                 canonical_key=m.canonical_key,
             )
-            quip = choose_quip(
-                settings, rerun_line=rerun_line, site_name=ehentai.SITE.name, channel_id=quip_channel
+            quip = await self._choose_quip(
+                message, settings, rerun_line=rerun_line, site_name=ehentai.SITE.name, channel_id=quip_channel
             )
             view = ehentai.build_card(meta, gallery, cover=cover, quip=quip)
             try:
-                sent = await self._send_card(message, settings, view, cover)
+                sent = await self._send_card(message, settings, view, cover, quip=quip)
             except discord.HTTPException:
                 log.exception("couldn't post the card for gallery %s", gallery.gid)
                 continue
@@ -723,7 +766,7 @@ class LinkFix(commands.Cog):
                     origin_author_id=message.author.id,
                     site=ehentai.SITE_ID,
                     canonical_key=m.canonical_key,
-                    original_url=gallery.url,
+                    original_url=gallery.link,
                     spoiler=gallery.spoiler,
                     quip=quip,
                     status="ok",
@@ -738,18 +781,17 @@ class LinkFix(commands.Cog):
         settings: GuildSettings,
         view: discord.ui.LayoutView,
         cover: ehentai.Cover | None,
+        *,
+        quip: str | None = None,
     ) -> discord.Message:
         """Cards always reply as BB (the card is BB's own, so copy-the-poster mode doesn't apply)."""
-        mentions = discord.AllowedMentions.none()
-        if not settings.silent:
-            mentions.replied_user = True
         files = [discord.File(io.BytesIO(cover.data), filename=cover.filename)] if cover else []
         return await message.channel.send(
             view=view,
             files=files,
             reference=message.to_reference(fail_if_not_exists=False),
-            allowed_mentions=mentions,
-            silent=settings.silent,
+            allowed_mentions=send_mentions(settings, quip, reply=True),
+            silent=settings.silent and not pings_target(settings, quip),
         )
 
     async def _send_message(
@@ -759,15 +801,12 @@ class LinkFix(commands.Cog):
             sent = await self._send_as_poster(message, settings, content, view)
             if sent is not None:
                 return sent
-        mentions = discord.AllowedMentions.none()
-        if not settings.silent:
-            mentions.replied_user = True
         reply = await message.channel.send(
             content,
             reference=message.to_reference(fail_if_not_exists=False),
             view=view,
-            allowed_mentions=mentions,
-            silent=settings.silent,
+            allowed_mentions=send_mentions(settings, content, reply=True),
+            silent=settings.silent and not pings_target(settings, content),
         )
         return Sent(message=reply)
 
@@ -787,8 +826,8 @@ class LinkFix(commands.Cog):
                     avatar_url=message.author.display_avatar.url,
                     view=view,
                     thread=thread if thread is not None else discord.utils.MISSING,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                    silent=settings.silent,
+                    allowed_mentions=send_mentions(settings, content, reply=False),
+                    silent=settings.silent and not pings_target(settings, content),
                     wait=True,
                 )
                 return Sent(message=sent, webhook=hook, thread=thread)

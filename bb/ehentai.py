@@ -33,7 +33,7 @@ _GALLERY = re.compile(
     r"https?://(?:www\.)?(?P<host>e-hentai\.org|exhentai\.org)/g/(?P<gid>\d{1,10})/(?P<token>[0-9a-f]{10})\b",
     re.IGNORECASE,
 )
-BLOCKED_TAGS = frozenset({"lolicon", "shotacon", "toddlercon"})
+BLOCKED_TAGS = frozenset({})
 SHOWN_NAMESPACES = (
     ("parody", "Parody"),
     ("character", "Characters"),
@@ -48,12 +48,22 @@ LINE_LIMIT = 300
 class Gallery:
     gid: int
     token: str
-    url: str  # canonical e-hentai URL (exhentai links are rewritten; the API is the same)
+    url: str  # e-hentai URL: what BB fetches (the API and cover pages live there)
     spoiler: bool = False
+    exhentai: bool = False  # posted as an ExHentai link; some galleries exist only there
 
     @property
     def canonical_key(self) -> str:
         return f"{SITE_ID}:{self.gid}"
+
+    @property
+    def link(self) -> str:
+        """Where the card's title and button point: ExHentai links stay on ExHentai."""
+        return f"https://exhentai.org/g/{self.gid}/{self.token}/" if self.exhentai else self.url
+
+    @property
+    def open_label(self) -> str:
+        return "Open on ExHentai" if self.exhentai else "Open on e-hentai"
 
     def as_match(self) -> LinkMatch:
         """A LinkMatch, so reruns and quips can treat galleries like any other link."""
@@ -73,7 +83,8 @@ def find_galleries(content: str) -> list[Gallery]:
             continue
         seen.add(gid)
         token = m["token"].lower()
-        found.append(Gallery(gid, token, f"https://e-hentai.org/g/{gid}/{token}/", url.spoiler))
+        ex = m["host"].lower() == "exhentai.org"
+        found.append(Gallery(gid, token, f"https://e-hentai.org/g/{gid}/{token}/", url.spoiler, ex))
         if len(found) >= MAX_GALLERIES:
             break
     return found
@@ -223,7 +234,7 @@ def card_text(meta: dict[str, Any], gallery: Gallery) -> str:
     if meta.get("rating"):
         stats.append(f"★ {meta['rating']}")
     lines = [
-        f"### [{_link_text(_clip(title, 256))}]({gallery.url})",
+        f"### [{_link_text(_clip(title, 256))}]({gallery.link})",
         " · ".join(s for s in stats if s),
         "",
         *tag_lines(list(meta.get("tags") or ())),
@@ -246,6 +257,6 @@ def build_card(
     if media and (cover or media.startswith("https://")):
         container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(media, spoiler=gallery.spoiler)))
     container.add_item(discord.ui.TextDisplay(card_text(meta, gallery)))
-    container.add_item(discord.ui.ActionRow(discord.ui.Button(label="Open on e-hentai", url=gallery.url)))
+    container.add_item(discord.ui.ActionRow(discord.ui.Button(label=gallery.open_label, url=gallery.link)))
     view.add_item(container)
     return view

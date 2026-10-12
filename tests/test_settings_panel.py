@@ -33,6 +33,7 @@ class FakeResponse:
         self.calls.append(("edit_message", kwargs))
 
     async def send_message(self, *args, **kwargs):
+        self.sent_args = args
         self.calls.append(("send_message", kwargs))
 
     async def send_modal(self, modal):
@@ -300,3 +301,48 @@ def test_settings_command_is_admin_only_and_guild_only():
     assert cmd.name == "settings"
     assert cmd.default_permissions == discord.Permissions(manage_guild=True)
     assert cmd.guild_only is True
+
+
+async def test_rare_line_section(panel):
+    panel.section = "rare"
+    panel.rebuild()
+    assert "not written yet" in panel_mod.describe("rare", panel.settings)
+    assert find(panel, panel_mod.RarePreviewButton).disabled  # nothing to preview yet
+
+    interaction = await click(panel, find(panel, panel_mod.ModalButton))
+    modal = interaction.response.calls[0][1]["modal"]
+    modal.input._value = "  {target} BB was thinking about you♡  "
+    await modal.on_submit(make_interaction())
+    assert panel.settings.rare_text == "{target} BB was thinking about you♡"
+
+    picker = find(panel, panel_mod.UserPicker, field="rare_target_id")
+    picker._values = [SimpleNamespace(id=42)]
+    await click(panel, picker)
+    assert panel.settings.rare_target_id == 42
+    text = panel_mod.describe("rare", panel.settings)
+    assert "> {target} BB was thinking about you♡" in text and "<@42>" in text and "1 in 1000" in text
+
+    preview = await click(panel, find(panel, panel_mod.RarePreviewButton))
+    kwargs = preview.response.calls[0][1]
+    assert kwargs["ephemeral"] is True and kwargs["allowed_mentions"].users is False
+    assert preview_text(preview) == "-# <@42> BB was thinking about you♡"
+
+    await click(panel, find(panel, panel_mod.SetButton, field="rare_text"))
+    assert panel.settings.rare_text == ""
+
+
+def preview_text(interaction):
+    return interaction.response.sent_args[0]
+
+
+async def test_use_on_next_link_arms_the_rare_line(panel):
+    panel.section = "rare"
+    panel.rebuild()
+    assert find(panel, panel_mod.SetButton, field="rare_armed").disabled  # no message yet
+    await panel.bot.settings.update(1, rare_text="{target} hi")
+    panel.settings = await panel.bot.settings.get(1)
+    panel.rebuild()
+    await click(panel, find(panel, panel_mod.SetButton, field="rare_armed"))
+    assert panel.settings.rare_armed is True
+    assert "Armed" in panel_mod.describe("rare", panel.settings)
+    assert find(panel, panel_mod.SetButton, field="rare_armed").disabled  # can't double-arm

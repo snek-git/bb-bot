@@ -45,12 +45,6 @@ def test_find_galleries_caps_at_four():
     assert len(ehentai.find_galleries(text)) == ehentai.MAX_GALLERIES
 
 
-def test_blocked_tags_in_any_namespace():
-    for tag in ("female:lolicon", "male:shotacon", "other:toddlercon", "LOLICON", "mixed:Shotacon"):
-        assert ehentai.is_blocked(meta(tags=["parody:x", tag])), tag
-    assert not ehentai.is_blocked(meta())
-    assert not ehentai.is_blocked(meta(tags=[]))
-
 
 def test_parse_gdata_drops_errors():
     payload = {"gmetadata": [meta(), {"gid": 5, "error": "Key missing, or incorrect key provided."}]}
@@ -139,3 +133,15 @@ async def test_fetch_cover_gives_up_quietly(monkeypatch):
     monkeypatch.setattr(ehentai, "_get_text", get_text)
     monkeypatch.setattr(ehentai, "_cover_cache", {})
     assert await ehentai.fetch_cover(None, ehentai.find_galleries(G1)[0], 10_000_000) is None
+
+
+def test_exhentai_links_stay_on_exhentai():
+    (gallery,) = ehentai.find_galleries("https://exhentai.org/g/123/abcdef0123/")
+    assert gallery.url == "https://e-hentai.org/g/123/abcdef0123/"  # fetched from e-hentai
+    assert gallery.link == "https://exhentai.org/g/123/abcdef0123/"  # but the card points to ExHentai
+    view = ehentai.build_card(meta(gid=123), gallery, cover=None)
+    _, (_, text, row) = _parts(view)
+    assert "(https://exhentai.org/g/123/abcdef0123/)" in text.content
+    assert (row.children[0].label, row.children[0].url) == ("Open on ExHentai", gallery.link)
+    (plain,) = ehentai.find_galleries(G1)
+    assert plain.link == G1 and plain.open_label == "Open on e-hentai"

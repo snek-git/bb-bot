@@ -16,6 +16,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bb import strings
+from bb.cogs.linkfix import rare_line
 from bb.links import sites
 from bb.settings_store import SITE_IDS, GuildSettings
 from bb.timeutil import zone
@@ -30,6 +31,7 @@ SECTIONS: tuple[tuple[str, str], ...] = (
     ("style", "Repost style"),
     ("original", "Original message"),
     ("quips", "Quips"),
+    ("rare", "Rare line"),
     ("reruns", "Repost roasts"),
     ("webhooks", "Webhooks"),
     ("roundup", "Roundup"),
@@ -58,6 +60,13 @@ QUIP_CHOICES: tuple[tuple[str, int], ...] = (
     ("1 in 10", 10),
     ("1 in 5", 5),
     ("Always", 1),
+)
+RARE_ODDS: tuple[tuple[str, int], ...] = (
+    ("Off", 0),
+    ("1 in 100", 100),
+    ("1 in 500", 500),
+    ("1 in 1000", 1000),
+    ("1 in 5000", 5000),
 )
 WINDOW_CHOICES = (1, 3, 7, 14, 30, 60, 90, 180, 365)
 WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
@@ -169,6 +178,14 @@ def describe(
             f"Quips: {quip_label(s.quip_rate).lower()}\n"
             f"Lewd channels: {lewd}\nChaos channels: {chaos}"
         )
+    if section == "rare":
+        text = s.rare_text.strip()
+        message = "\n".join(f"> {line}" for line in text.splitlines()) if text else "not written yet"
+        who = f"<@{s.rare_target_id}>" if s.rare_target_id else "nobody"
+        odds = "off" if s.rare_rate <= 0 else f"1 in {s.rare_rate} fixed links"
+        hint = "" if text else "\n-# Write a message to switch it on. Put {target} where the ping should go."
+        armed = "\nArmed: the next fixed link gets it." if s.rare_armed and text else ""
+        return f"Message:\n{message}\nPings: {who}\nOdds: {odds}{armed}{hint}"
     if section == "reruns":
         scope = "same channel" if s.rerun_same_channel else "whole server"
         return (
@@ -299,6 +316,55 @@ class ChannelPicker(_Item, discord.ui.ChannelSelect):
         await self.panel.apply(interaction, **{self.field: value})
 
 
+class UserPicker(_Item, discord.ui.UserSelect):
+    """One user (or nobody) for a setting."""
+
+    def __init__(self, field: str, current: int | None, placeholder: str, row: int) -> None:
+        super().__init__(
+            placeholder=placeholder,
+            min_values=0,
+            max_values=1,
+            default_values=[discord.Object(current)] if current else [],
+            row=row,
+        )
+        self.field = field
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await self.panel.apply(interaction, **{self.field: self.values[0].id if self.values else None})
+
+
+class RareTextModal(discord.ui.Modal):
+    def __init__(self, panel: SettingsPanel) -> None:
+        super().__init__(title="Rare line", timeout=600)
+        self.panel = panel
+        self.input = discord.ui.TextInput(
+            label="Message ({target} = where the ping goes)",
+            style=discord.TextStyle.paragraph,
+            default=panel.settings.rare_text or None,
+            placeholder="{target} BB was thinking about you♡",
+            max_length=1500,
+            required=True,
+        )
+        self.add_item(self.input)
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        await self.panel.apply(interaction, rare_text=self.input.value.strip())
+
+
+class RarePreviewButton(_Item, discord.ui.Button):
+    """Shows the line as BB would post it, privately and without pinging anyone."""
+
+    def __init__(self, row: int, disabled: bool) -> None:
+        super().__init__(label="Preview", style=discord.ButtonStyle.secondary, row=row, disabled=disabled)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await interaction.response.send_message(
+            f"-# {rare_line(self.panel.settings)}",
+            ephemeral=True,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+
 class SetButton(_Item, discord.ui.Button):
     """Sets a field to a fixed value (e.g. 'Turn off' clears a channel)."""
 
@@ -413,6 +479,18 @@ def _build_quips(p: SettingsPanel) -> None:
             row=3,
         )
     )
+
+
+def _build_rare(p: SettingsPanel) -> None:
+    s = p.settings
+    p.add_item(UserPicker("rare_target_id", s.rare_target_id, "Who gets pinged", row=1))
+    p.add_item(ChoiceSelect("rare_rate", RARE_ODDS, s.rare_rate, "Odds", row=2))
+    p.add_item(ModalButton("Write message", RareTextModal, row=3))
+    p.add_item(RarePreviewButton(row=3, disabled=not s.rare_text))
+    p.add_item(
+        SetButton("rare_armed", True, "Use on next link", row=3, disabled=not s.rare_text or s.rare_armed)
+    )
+    p.add_item(SetButton("rare_text", "", "Turn off", row=3, disabled=not s.rare_text))
 
 
 def _build_reruns(p: SettingsPanel) -> None:
@@ -534,6 +612,7 @@ BUILDERS: dict[str, Callable[[SettingsPanel], None]] = {
     "style": _build_style,
     "original": _build_original,
     "quips": _build_quips,
+    "rare": _build_rare,
     "reruns": _build_reruns,
     "webhooks": _build_webhooks,
     "roundup": _build_roundup,

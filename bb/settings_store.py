@@ -32,6 +32,11 @@ class GuildSettings:
     # Channels whose quips come from a themed pool instead of the normal one.
     lewd_channels: tuple[int, ...] = ()  # e.g. #2d-cum-zone: flirty teasing
     chaos_channels: tuple[int, ...] = ()  # e.g. #brazil (/b/): disgusted-but-amused
+    # A custom line on 1 in rare_rate fixes that pings rare_target_id ({target} marks where the ping goes).
+    rare_text: str = ""
+    rare_target_id: int | None = None
+    rare_rate: int = 1000
+    rare_armed: bool = False  # "Use on next link": the next fixed link gets it, then this resets
     timezone: str = "UTC"
     # Reruns
     reruns_enabled: bool = True

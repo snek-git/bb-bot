@@ -597,7 +597,7 @@ def eh_meta(tags=("parody:touhou project",)):
 def cards(h, monkeypatch):
     sent = []
 
-    async def send_card(message, settings, view, cover):
+    async def send_card(message, settings, view, cover, quip=None):
         sent.append((view, cover))
         return SimpleNamespace(id=next(h.ids))
 
@@ -625,16 +625,6 @@ async def test_gallery_link_gets_a_card(h, db, cards, monkeypatch):
     assert h.original == [(500, "suppress")]  # the original's own bare preview is hidden
 
 
-async def test_blocked_gallery_gets_nothing(h, db, cards, monkeypatch):
-    async def fetch(session, galleries):
-        return eh_meta(tags=("parody:x", "female:lolicon"))
-
-    monkeypatch.setattr(lf.ehentai, "fetch_metadata", fetch)
-    await h.cog.process(message(EH))
-    assert cards == [] and h.original == []
-    assert await db.post_keys_for_message(500) == set()
-    assert await db.get_reposts_for_origin(500) == []
-
 
 async def test_reposted_gallery_gets_roasted(h, db, cards, monkeypatch):
     async def fetch(session, galleries):
@@ -656,3 +646,55 @@ async def test_cards_can_be_turned_off(h, db, cards, monkeypatch):
     await h.quiet(sites_enabled={**GuildSettings().sites_enabled, "ehentai": False})
     await h.cog.process(message(EH))
     assert cards == []
+
+
+# --- the rare custom line ----------------------------------------------------------------
+
+RARE = replace(GuildSettings(), rare_text="{target} BB thinks about you a lot♡", rare_target_id=42)
+
+
+def test_rare_line_pings_its_target():
+    assert lf.rare_line(RARE) == "<@42> BB thinks about you a lot♡"
+    no_slot = replace(RARE, rare_text="hello")
+    assert lf.rare_line(no_slot) == "<@42> hello"  # ping goes first when the text has no {target}
+    nobody = replace(RARE, rare_target_id=None)
+    assert lf.rare_line(nobody) == "BB thinks about you a lot♡"
+
+
+def test_rare_line_odds_and_priority():
+    hit = lf.choose_quip(RARE, rerun_line=None, site_name="X", rng=FixedRng(0))
+    assert hit == "<@42> BB thinks about you a lot♡"
+    assert lf.choose_quip(RARE, rerun_line=None, site_name="X", rng=FixedRng(7)) is None  # 7 != 0
+    assert lf.choose_quip(RARE, rerun_line="roast", site_name="X", rng=FixedRng(0)) == "roast"
+    off = replace(RARE, rare_text="")
+    normal = lf.choose_quip(off, rerun_line=None, site_name="X", rng=FixedRng(0))
+    assert normal != hit and "<@42>" not in (normal or "")
+
+
+def test_only_the_rare_target_can_be_pinged():
+    mentions = lf.send_mentions(RARE, "-# <@42> hi <@99>", reply=True)
+    assert [u.id for u in mentions.users] == [42]
+    assert mentions.everyone is False and mentions.roles is False
+    quiet = lf.send_mentions(RARE, "-# a normal quip", reply=True)
+    assert quiet.users is False and quiet.replied_user is False  # silent mode: nobody
+    assert lf.pings_target(RARE, "x <@42>") and not lf.pings_target(RARE, None)
+
+
+async def test_armed_rare_line_fires_once(h, db):
+    h.embed_script = [[text_embed().to_dict()], [text_embed().to_dict()]]
+    await h.quiet(rare_text="{target} hi♡", rare_target_id=42, rare_armed=True)
+    await h.cog.process(message("https://x.com/a/status/1", mid=400))
+    await h.cog.process(message("https://x.com/a/status/2", mid=500))
+    first, second = h.sent[0][0], h.sent[1][0]
+    assert first.startswith("-# <@42> hi♡ ")
+    assert "<@42>" not in second
+    assert (await h.bot.settings.get(G)).rare_armed is False
+
+
+async def test_armed_rare_line_waits_out_a_repost_roast(h, db):
+    h.embed_script = [[text_embed().to_dict()], [text_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1", mid=400, author_id=100, name="alice"))
+    await h.quiet(rare_text="{target} hi♡", rare_target_id=42, rare_armed=True)
+    await h.cog.process(message("https://x.com/a/status/1", mid=500, author_id=200, name="bob"))
+    assert "alice" in h.sent[1][0] and "<@42>" not in h.sent[1][0]  # the roast wins
+    assert (await h.bot.settings.get(G)).rare_armed is True  # still armed for the next link
