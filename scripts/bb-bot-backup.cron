@@ -1,0 +1,3 @@
+# Installed as /etc/cron.d/bb-bot-backup on the server. Nightly at 04:30 server time.
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+30 4 * * * root /opt/bb-bot/scripts/backup.sh >> /var/log/bb-bot-backup.log 2>&1

@@ -1,0 +1,20 @@
+services:
+  bb:
+    build: .
+    image: bb-bot
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - bb-data:/app/data
+    # Hard caps so a big video download in the upload fallback can never push the host into
+    # killing something else (like the Minecraft server). Over the cap, only BB gets restarted.
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  bb-data:

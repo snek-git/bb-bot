@@ -1,0 +1,8 @@
+# Allow-list: the image needs only the lockfile, the project file and the package.
+# Secrets (.env) and the database (data/) must never end up in the image.
+*
+!pyproject.toml
+!uv.lock
+!bb
+**/__pycache__
+**/*.py[cod]

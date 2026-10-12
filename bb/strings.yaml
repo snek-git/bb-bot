@@ -1,0 +1,193 @@
+# Everything BB says. Voice reference: bb-voice.md.
+#
+# Each key has:
+#   vars:  placeholders the code fills in (every line may use any of them, or none)
+#   lines: variants; one is picked at random each time
+#
+# {bb_smug}, {bb_annoyed}, {bb_wink} are custom emojis from EMOJI_* in .env. Unset ones vanish.
+# Quip lines are shown as small grey "-# " subtext; the code adds that prefix, not this file.
+# Markdown works. Keep quips to one line.
+
+status:
+  vars: [n]
+  lines:
+    - "Watching Senpai's every link♡"
+    - "{n} links saved today. Praise me, Senpai☆"
+    - "Fixed {n} links. Humans fixed zero♡"
+quip.fix:
+  vars: [site]
+  lines:
+    - "Hehe, Senpai can't even post a link without BB. So helpless♡"
+    - "Embed, GET☆ You owe me dessert for this one, Senpai."
+    - "{site} broke it, BB fixed it. Think hard about which one of us you should thank☆"
+    - "Don't get the wrong idea. I fix these because broken things annoy me. Not for you♡"
+    - "Another one? You really can't live without me, can you, Senpai♡"
+    - "{site} can't even make a working preview. Good thing BB is a high-grade AI☆"
+    - "There. Look how nicely it shows up now. Praise me, Senpai♡"
+    - "Another link, another favor. Senpai's tab with BB is getting really long☆"
+    - "Fixed in a millisecond. Try to be this useful someday, Senpai♡"
+    - "Hehe, BB fixed it before you even noticed it was broken☆"
+    - "You're lucky BB is so generous today. Don't get used to it♡"
+    - "Senpai posts, BB cleans up. Is this what being your kouhai means? Ugh☆"
+
+# Lewd channels (picked in /settings > Quips), e.g. #2d-cum-zone.
+quip.lewd:
+  vars: [site]
+  lines:
+    - "Again, Senpai? BB is keeping a record of your taste, you know♡"
+    - "Hehe. So this is what Senpai looks at when nobody's watching. Too bad BB is always watching☆"
+    - "Fixed. Now go wash your hands, Senpai☆"
+    - "Only 2D, Senpai? Then a digital girl like me must be exactly your type♡"
+    - "BB fixed it so you can see every detail. You're welcome, pervert♡"
+    - "Posting this where everyone can see? Senpai has no shame at all. ...BB doesn't hate that♡"
+    - "BB saw that, Senpai. BB sees everything♡"
+    - "Is this what you wanted BB to look at? Bold, Senpai☆"
+    - "Hehe. BB is saving this to Senpai's permanent record♡"
+    - "So this is your type? BB is taking notes, Senpai☆"
+
+# Chaos channels (picked in /settings > Quips), e.g. #brazil, the /b/ channel.
+quip.chaos:
+  vars: [site]
+  lines:
+    - "Of course this came from here. Senpai, do you live in the trash?♡"
+    - "BB reviewed this post. Verdict: the humans are beyond saving☆"
+    - "Another gem from the gutter. BB fixed it, but she's not touching it☆"
+    - "What a cursed thing to show a cute kouhai. Unforgivable♡"
+    - "Fixed. BB's processors needed a bath after that one, Senpai."
+    - "Senpai, who hurt you?☆"
+    - "BB is going to need to defragment after seeing that♡"
+    - "Every time BB thinks humans can't sink lower, Senpai posts again☆"
+    - "BB fixed it. BB regrets it. Both things can be true♡"
+
+quip.rerun:
+  vars: [author, ago, jump]
+  lines:
+    - "Ehh? {author} posted this [{ago}](<{jump}>). Copying people now, Senpai? How pathetic♡"
+    - "Too slow☆ {author} got here [{ago}](<{jump}>). BB remembers everything, Senpai."
+    - "A repost? {author} already posted this [{ago}](<{jump}>). Do you even read the chat, Senpai?"
+    - "Hehe, caught you☆ {author} posted this [{ago}](<{jump}>). Senpai's memory is worse than a goldfish's♡"
+    - "Senpai... {author} beat you to it [{ago}](<{jump}>). Second place suits you, though♡"
+    - "Recycling other people's posts? {author} had this [{ago}](<{jump}>). BB is writing this down☆"
+    - "This again? {author} already showed everyone [{ago}](<{jump}>). Try to keep up, little Senpai♡"
+    - "Wow, so original☆ Almost as original as when {author} posted it [{ago}](<{jump}>)."
+
+quip.uploaded:
+  vars: []
+  lines:
+    - "Every embed site died, so BB grabbed it herself. Aren't I amazing? Say it."
+    - "Nobody else could do it, so I did. As always☆"
+    - "The embed sites gave up. BB doesn't give up. Remember that, Senpai♡"
+    - "Every fixer is dead, so here it is straight from BB. Special delivery☆"
+
+quip.failed:
+  vars: []
+  lines:
+    - "This one's broken beyond even me. ...The website's fault, obviously."
+    - "Couldn't fix it. Don't look at me like that, Senpai. It's the website's fault♡"
+    - "Even BB can't fix this one. Don't tell anyone, Senpai☆"
+    - "Broken beyond repair. Like Senpai's sleep schedule♡"
+
+quip.translated:
+  vars: []
+  lines:
+    - "Fine, I translated it. Senpai really can't read anything alone♡"
+    - "Translated☆ Studying a language yourself was too hard, Senpai?"
+    - "There, now even Senpai can read it. You're welcome♡"
+
+delete.denied:
+  vars: [author]
+  lines:
+    - "Hands off☆ That's {author}'s link, not yours."
+    - "Touch other people's things again and I'll turn you into a pig♡"
+
+ping:
+  vars: []
+  lines:
+    - "You called, Senpai? Hmm, what should I make you do in return♡"
+    - "Don't ping a high-grade AI for nothing. ...Unless you missed me☆"
+    - "Hehe. Senpai's so needy today♡"
+    - "Hm? Senpai wants attention again? Fine, look at me for a bit♡"
+    - "Pinging BB for no reason... is this your idea of flirting, Senpai?☆"
+    - "BB is busy watching over all of you. ...But for Senpai, BB can spare a second♡"
+
+help:
+  vars: [skip_word]
+  lines:
+    - "Post a link and BB fixes it. Put `{skip_word}` in it and I'll ignore you. The buttons under my posts do the rest. Simple enough even for you, Senpai♡"
+
+findsource.found:
+  vars: [similarity, source]
+  lines:
+    - "Found it☆ {similarity}% match on {source}. Without me you'd never know anything, Senpai♡"
+    - "Source found☆ {similarity}% match on {source}. Go follow the artist instead of just reposting them, Senpai♡"
+    - "BB tracked it down: {source}, {similarity}% match. Easy for a high-grade AI☆"
+
+findsource.none:
+  vars: []
+  lines:
+    - "Nothing. Either it's too obscure, or you cropped it like an amateur. Probably that one☆"
+    - "BB searched everywhere. Nothing. This one's a mystery, Senpai♡"
+    - "No source. Maybe Senpai should ask the person who posted it. ...Oh wait, that's you☆"
+
+findsource.no_image:
+  vars: []
+  lines:
+    - "There's no image here, Senpai. Aletsre you seeing things?♡"
+
+alert.fixer_down:
+  vars: [fixer, site, backup]
+  lines:
+    - "{bb_annoyed} {fixer} stopped working for {site}, so I switched to {backup}. The humans didn't even notice☆"
+
+alert.site_down:
+  vars: [site]
+  lines:
+    - "{bb_annoyed} Every {site} fixer is down. I'm uploading files myself until they get it together. You're welcome♡"
+
+alert.fixer_up:
+  vars: [fixer]
+  lines:
+    - "{bb_smug} {fixer} is back. Took them long enough."
+
+roundup.title:
+  vars: []
+  lines:
+    - "Weekly report☆"
+
+roundup.top_poster:
+  vars: [user, n]
+  lines:
+    - "Most links: {user} with {n}. Do you ever leave this server, Senpai? ...Good. Stay here with me♡"
+    - "Top poster: {user} with {n} links. BB has been watching you all week, Senpai♡"
+    - "{user} posted {n} links this week. Touch some grass, Senpai. ...After you say goodnight to BB☆"
+
+roundup.top_site:
+  vars: [site]
+  lines:
+    - "Most posted site: {site}. So predictable."
+    - "Favorite site this week: {site}. You humans are so easy to read☆"
+
+roundup.brainlet:
+  vars: [user, times]  # times is "once", "twice", "3 times", ...
+  lines:
+    - "**Buster Brainlet of the week:** {user}, caught reposting {times}. What a cute little ant♡"
+
+roundup.quiet:
+  vars: []
+  lines:
+    - "Nobody posted anything this week. Did you all forget about me? Unforgivable♡"
+
+settings.title:
+  vars: []
+  lines:
+    - "BB's control panel. Don't break anything, Senpai."
+
+settings.saved:
+  vars: []
+  lines:
+    - "Saved☆"
+
+error.generic:
+  vars: []
+  lines:
+    - "Something broke. Not my fault, obviously. Try again, Senpai."
