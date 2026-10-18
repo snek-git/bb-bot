@@ -8,7 +8,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from bb import render, strings
+from bb import render, strings, upload
 from bb.config import Config
 from bb.db import Database
 from bb.settings_store import SettingsStore
@@ -68,6 +68,7 @@ class BBBot(commands.Bot):
         self.http_session = aiohttp.ClientSession(
             timeout=aiohttp.ClientTimeout(total=30),
             headers={"User-Agent": USER_AGENT},
+            connector=upload.public_connector(),  # nothing BB fetches may reach its own network
         )
         for extension in EXTENSIONS:
             await self.load_extension(extension)

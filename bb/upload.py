@@ -13,16 +13,21 @@ One strategy per site (PLAN.md, "Upload fallback"):
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
 import shutil
+import socket
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
-from urllib.parse import unquote, urlencode, urlsplit
+from urllib.parse import unquote, urlencode, urljoin, urlsplit
 
 import aiohttp
+import aiohttp.abc
 import yt_dlp
 
 from bb.links.model import LinkMatch
@@ -32,6 +37,12 @@ log = logging.getLogger(__name__)
 TOTAL_TIMEOUT = 60.0  # seconds for the whole fetch_media call (read at call time; tests patch it)
 MAX_FILES = 4
 CHUNK = 64 * 1024
+MAX_REDIRECTS = 5
+# Media URLs come from API answers and post data that posters control (a Reddit post's link, a
+# Bluesky DID document): never let one reach BB's own network (the Docker host, the LAN). Tests
+# serve from 127.0.0.1 and switch this on.
+ALLOW_PRIVATE_HOSTS = False
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 FXTWITTER_API = "https://api.fxtwitter.com"
 VXTWITTER_API = "https://api.vxtwitter.com"
@@ -190,11 +201,103 @@ def _item(
 
 
 def _ext_for(content_type: str | None, url: str) -> str | None:
-    ext = _MIME_EXT.get((content_type or "").split(";")[0].strip().lower())
+    """File extension for a response, or None if it isn't media. url is where the body really came
+    from (after redirects)."""
+    mime = (content_type or "").split(";")[0].strip().lower()
+    ext = _MIME_EXT.get(mime)
     if ext:
         return ext
+    if mime and not mime.startswith(("image/", "video/")) and mime not in _OPAQUE_MIMES:
+        return None  # a web page or an API answer, whatever the URL ends in
     suffix = PurePosixPath(urlsplit(url).path).suffix.lower().lstrip(".")
     return suffix if suffix in _URL_EXTS else None
+
+
+_OPAQUE_MIMES = frozenset({"application/octet-stream", "binary/octet-stream"})
+
+
+def _is_public(address: str) -> bool:
+    try:
+        return ipaddress.ip_address(address.split("%", 1)[0]).is_global
+    except ValueError:
+        return False
+
+
+class PublicResolver(aiohttp.abc.AbstractResolver):
+    """DNS for BB's HTTP sessions: only public internet addresses come back. _public_url checks a URL
+    before the request; this checks the address actually connected to, so a host that answers
+    public first and private second (DNS rebinding) still can't reach BB's own network."""
+
+    def __init__(self) -> None:
+        self._inner = aiohttp.ThreadedResolver()
+
+    async def resolve(
+        self, host: str, port: int = 0, family: socket.AddressFamily = socket.AF_INET
+    ) -> list[aiohttp.abc.ResolveResult]:
+        found = await self._inner.resolve(host, port, family)
+        if ALLOW_PRIVATE_HOSTS:
+            return found
+        public = [entry for entry in found if _is_public(str(entry["host"]))]
+        if not public:
+            raise OSError(f"{host} resolves only to non-public addresses")
+        return public
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+
+def public_connector() -> aiohttp.TCPConnector:
+    return aiohttp.TCPConnector(resolver=PublicResolver())
+
+
+async def _public_url(url: str) -> bool:
+    """http(s) to a host that resolves only to public internet addresses."""
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return False
+    if ALLOW_PRIVATE_HOSTS:
+        return True
+    host = parts.hostname
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        return _is_public(host)
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+        infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except (OSError, ValueError):
+        return False
+    return bool(infos) and all(_is_public(str(info[4][0])) for info in infos)
+
+
+@asynccontextmanager
+async def _get(
+    session: aiohttp.ClientSession,
+    url: str,
+    *,
+    headers: dict[str, str],
+    params: dict[str, str] | None = None,
+) -> AsyncIterator[aiohttp.ClientResponse]:
+    """GET that follows redirects itself, checking every hop with _public_url."""
+    for _ in range(MAX_REDIRECTS + 1):
+        if not await _public_url(url):
+            raise ValueError(f"refusing non-public URL {urlsplit(url).hostname!r}")
+        resp = await session.get(
+            url, params=params, headers=headers, timeout=_HTTP_TIMEOUT, allow_redirects=False
+        )
+        location = resp.headers.get("Location") if resp.status in _REDIRECT_STATUSES else None
+        if location:
+            resp.release()
+            url, params = urljoin(str(resp.url), location), None
+            continue
+        try:
+            yield resp
+        finally:
+            resp.release()
+        return
+    raise ValueError(f"too many redirects for {urlsplit(url).hostname!r}")
 
 
 async def _download_items(ctx: _Ctx, items: list[_Item]) -> list[MediaFile]:
@@ -227,14 +330,14 @@ async def _download(ctx: _Ctx, item: _Item, index: int) -> MediaFile | None:
 
 async def _download_one(ctx: _Ctx, url: str, headers: dict[str, str], index: int) -> MediaFile | None:
     headers = {"User-Agent": BROWSER_UA, **headers}
-    async with ctx.session.get(url, headers=headers, timeout=_HTTP_TIMEOUT) as resp:
+    async with _get(ctx.session, url, headers=headers) as resp:
         if resp.status != 200:
             log.info("upload: %s -> HTTP %s", url, resp.status)
             return None
         if resp.content_length is not None and resp.content_length > ctx.max_bytes:
             log.info("upload: %s is %s bytes, over %s", url, resp.content_length, ctx.max_bytes)
             return None
-        ext = _ext_for(resp.headers.get("Content-Type"), url)
+        ext = _ext_for(resp.headers.get("Content-Type"), str(resp.url))
         if ext is None:
             log.info("upload: %s isn't media (%s)", url, resp.headers.get("Content-Type"))
             return None
@@ -267,8 +370,8 @@ async def _get_json(
 ) -> Any:
     """GET and decode JSON. None on HTTP errors, non-200s and non-JSON bodies (e.g. Cloudflare pages)."""
     try:
-        async with (session or ctx.session).get(
-            url, params=params, headers={"User-Agent": BROWSER_UA, **(headers or {})}, timeout=_HTTP_TIMEOUT
+        async with _get(
+            session or ctx.session, url, params=params, headers={"User-Agent": BROWSER_UA, **(headers or {})}
         ) as resp:
             if resp.status != 200:
                 log.info("upload: %s -> HTTP %s", url, resp.status)
@@ -298,10 +401,24 @@ class _YtdlpLog:
 
 async def _ytdlp(ctx: _Ctx, url: str) -> list[MediaFile]:
     cancel = threading.Event()
+    job = asyncio.get_running_loop().run_in_executor(
+        None, _ytdlp_sync, url, ctx.workdir, ctx.stem, ctx.max_bytes, cancel
+    )
     try:
-        return await asyncio.to_thread(_ytdlp_sync, url, ctx.workdir, ctx.stem, ctx.max_bytes, cancel)
+        return await asyncio.shield(job)
+    except asyncio.CancelledError:
+        # Timed out: the thread keeps going until its next progress tick, and may write into workdir
+        # after the caller already removed it. Clean up again once it has really stopped.
+        job.add_done_callback(lambda done: _cleanup_after(done, ctx.workdir))
+        raise
     finally:
-        cancel.set()  # on timeout the thread keeps running; this stops it at the next progress tick
+        cancel.set()
+
+
+def _cleanup_after(job: asyncio.Future[Any], workdir: Path) -> None:
+    if not job.cancelled() and job.exception() is not None:
+        log.info("upload: abandoned yt-dlp run ended with %r", job.exception())
+    shutil.rmtree(workdir, ignore_errors=True)
 
 
 def _ytdlp_options(workdir: Path, stem: str, max_bytes: int, cancel: threading.Event) -> dict[str, Any]:
@@ -333,6 +450,8 @@ def _ytdlp_options(workdir: Path, stem: str, max_bytes: int, cancel: threading.E
         "fragment_retries": 1,
         "extractor_retries": 1,
         "cachedir": False,
+        # Site extractors only: the generic one would fetch whatever URL a post points at.
+        "allowed_extractors": ["default", "-generic"],
         "overwrites": True,
         "progress_hooks": [hook],
         "postprocessor_hooks": [hook],
@@ -529,7 +648,7 @@ def _reddit_items(post: dict[str, Any]) -> list[_Item]:
 async def _reddit_post(ctx: _Ctx, post_id: str) -> dict[str, Any] | None:
     # Reddit 403s anonymous JSON requests without a "loid" cookie; old.reddit.com hands one out.
     # A private cookie jar keeps that out of the bot's shared session.
-    async with aiohttp.ClientSession(headers={"User-Agent": BROWSER_UA}) as rs:
+    async with aiohttp.ClientSession(headers={"User-Agent": BROWSER_UA}, connector=public_connector()) as rs:
         try:
             async with rs.get(f"{OLD_REDDIT}/", timeout=_HTTP_TIMEOUT) as resp:
                 resp.release()

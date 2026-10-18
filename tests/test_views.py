@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -150,21 +151,14 @@ def test_templates_fullmatch_only_their_ids():
 
 
 async def test_view_for_tweet_with_image():
-    view = views.make_repost_view(
-        site_id="twitter", origin_author_id=7, translated=False, has_image=True,
-        original_url="https://x.com/a/status/1",
-    )
-    assert _ids(view) == ["bb:src", "bb:tr:0", None]
-    labels = [getattr(item, "item", item).label for item in view.children]
-    assert labels == ["Find source", "Translate", "Open on X"]
-    assert view.children[-1].url == "https://x.com/a/status/1"
+    view = views.make_repost_view(site_id="twitter", origin_author_id=7, translated=False, has_image=True)
+    assert _ids(view) == ["bb:src", "bb:tr:0"]
+    assert [item.item.label for item in view.children] == ["Find source", "Translate"]
     assert view.timeout is None and view.is_persistent()
 
 
 async def test_view_variants():
     assert _ids(views.make_repost_view(site_id="pixiv", origin_author_id=7)) == []
-    pixiv = views.make_repost_view(site_id="pixiv", origin_author_id=7, original_url="https://www.pixiv.net/artworks/1")
-    assert pixiv.children[0].label == "Open on Pixiv"
     translated = views.make_repost_view(site_id="twitter", origin_author_id=7, translated=True)
     assert _ids(translated) == ["bb:tr:1"]
     assert translated.children[0].item.label == "Original"
@@ -304,9 +298,14 @@ def test_translated_text_flips_and_back(fake_sites):
     text, fixer, quip = buttons.translated_text(make_row(), True, "en", set())
     assert fixer is FX
     assert "(https://fxtwitter.com/bb/status/1/en)" in text
-    assert quip in strings.variants("quip.translated") and text.startswith(f"-# {quip} ")
-    text, fixer, quip = buttons.translated_text(make_row(translated=True, quip="x"), False, "en", set())
-    assert "(https://fxtwitter.com/bb/status/1)" in text and quip is None and "-#" not in text
+    assert quip is None and text.count(" · ") == 1  # translating is silent: "Tweet · FxTwitter", no line
+    text, fixer, quip = buttons.translated_text(make_row(translated=True), False, "en", set())
+    assert "(https://fxtwitter.com/bb/status/1)" in text and quip is None
+
+
+def test_translate_keeps_a_repost_roast(fake_sites):
+    text, _, quip = buttons.translated_text(make_row(quip="Too slow☆ roast"), True, "en", set())
+    assert quip == "Too slow☆ roast" and text.endswith(" · Too slow☆ roast")
 
 
 def test_translated_text_switches_to_translatable_fixer(fake_sites):
@@ -336,7 +335,7 @@ async def test_translate_edits_message_and_row(db, fake_sites):
     assert "(https://fxtwitter.com/bb/status/1/ja)" in kwargs["content"]
     assert _ids(kwargs["view"])[:2] == ["bb:src", "bb:tr:1"]
     row = await db.get_repost(500)
-    assert row.translated is True and row.fixer_id == "fxtwitter" and row.quip
+    assert row.translated is True and row.fixer_id == "fxtwitter" and row.quip is None  # silent
 
 
 async def test_translate_webhook_repost_in_thread(db, fake_sites, monkeypatch):
@@ -402,13 +401,24 @@ def fake_links(monkeypatch):
     monkeypatch.setattr(sites, "match", lambda url, spoiler=False: object() if "x.com" in url else None)
 
 
-def make_chat_message(content, author_id=3):
+class _Typing:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def make_chat_message(content, author_id=3, created_at=None, attachments=(), reference=None, fetched=None):
     return SimpleNamespace(
         content=content,
         guild=SimpleNamespace(id=1),
         webhook_id=None,
-        channel=SimpleNamespace(id=5),
+        channel=SimpleNamespace(id=5, typing=_Typing, fetch_message=AsyncMock(return_value=fetched)),
         author=SimpleNamespace(id=author_id, bot=False),
+        created_at=created_at or datetime.now(UTC),
+        attachments=list(attachments),
+        reference=reference,
         reply=AsyncMock(),
     )
 
@@ -445,3 +455,59 @@ async def test_chat_respects_disabled_channels(db, fake_links):
     message = make_chat_message("<@99> help")
     await chat.Chat(bot).on_message(message)
     message.reply.assert_not_awaited()
+
+
+async def test_chat_ignores_old_and_paused(db, fake_links):
+    store = SettingsStore(db)
+    bot = SimpleNamespace(user=SimpleNamespace(id=99), settings=store, http_client=None)
+    old = make_chat_message("<@99> help", created_at=datetime(2021, 1, 1, tzinfo=UTC))
+    await chat.Chat(bot).on_message(old)
+    old.reply.assert_not_awaited()  # a replayed ping from the past
+    await store.update(1, paused=True)
+    fresh = make_chat_message("<@99> help")
+    await chat.Chat(bot).on_message(fresh)
+    fresh.reply.assert_not_awaited()
+
+
+
+def _finder():
+    finder = SimpleNamespace(answer=AsyncMock(return_value=("- [Danbooru](<https://d/1>) 90%", "VIEW")))
+    return finder
+
+
+def _chat_bot(store, finder):
+    return SimpleNamespace(
+        user=SimpleNamespace(id=99), settings=store, http_client=None,
+        get_cog=lambda name: finder if name == "FindSource" else None,
+    )
+
+
+async def test_ping_with_an_uploaded_image_finds_its_source(db, fake_links):
+    finder = _finder()
+    upload = SimpleNamespace(content_type="image/png", filename="art.png", url="https://cdn/art.png")
+    message = make_chat_message("<@99> sauce?", attachments=[upload])
+    await chat.Chat(_chat_bot(SettingsStore(db), finder)).on_message(message)
+    finder.answer.assert_awaited_once_with("https://cdn/art.png")
+    args, kwargs = message.reply.await_args
+    assert args[0] == "- [Danbooru](<https://d/1>) 90%" and kwargs["view"] == "VIEW"
+
+
+async def test_ping_replying_to_an_image_searches_that_image(db, fake_links):
+    finder = _finder()
+    target = SimpleNamespace(
+        attachments=[],
+        embeds=[SimpleNamespace(image=SimpleNamespace(url="https://pbs/x.jpg"), thumbnail=None)],
+    )
+    ref = SimpleNamespace(message_id=123, resolved=None)
+    message = make_chat_message("<@99>", reference=ref, fetched=target)
+    await chat.Chat(_chat_bot(SettingsStore(db), finder)).on_message(message)
+    message.channel.fetch_message.assert_awaited_once_with(123)
+    finder.answer.assert_awaited_once_with("https://pbs/x.jpg")
+
+
+async def test_ping_without_an_image_still_just_talks(db, fake_links):
+    finder = _finder()
+    message = make_chat_message("<@99> hi")
+    await chat.Chat(_chat_bot(SettingsStore(db), finder)).on_message(message)
+    finder.answer.assert_not_awaited()
+    assert message.reply.await_args.args[0] in strings.variants("ping")

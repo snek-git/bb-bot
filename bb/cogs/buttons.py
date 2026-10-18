@@ -42,7 +42,7 @@ def translated_text(
 ) -> tuple[str, Fixer, str | None]:
     """(new repost text, fixer used, new quip) for flipping a repost to translated or back.
 
-    The quip column holds one line: translating swaps it for the translate quip, reverting clears it.
+    Translating is silent: the repost keeps whatever line it had (a repost roast, the rare line).
     Raises LookupError if the row can't be rebuilt.
     """
     if row.status in ("uploaded", "failed"):
@@ -54,15 +54,9 @@ def translated_text(
     fixer = translation_fixer(current, row.site, down) if translate else current
     if fixer is None:
         raise LookupError(f"repost {row.repost_id}: no usable fixer")
-    quip = strings.line("quip.translated") if translate else None
+    quip = row.quip
     url = sites.fixed_url(match, fixer, lang=lang if translate else None)
     return render.format_repost(match, fixer.name, url, quip=quip), fixer, quip
-
-
-def source_url_for(row: RepostRow) -> str:
-    """Where the 'Open on X' button points: the real post, even if a fixer link was posted."""
-    match = sites.match(row.original_url, spoiler=row.spoiler)
-    return sites.source_url(match) if match else row.original_url
 
 
 def _thread_of(channel: Any) -> Any:
@@ -166,7 +160,6 @@ class Buttons(commands.Cog):
             origin_author_id=row.origin_author_id,
             translated=translate,
             has_image=views.has_find_source(message.components),
-            original_url=source_url_for(row),
         )
         webhook_id = webhook_id_for(row, message)
         try:

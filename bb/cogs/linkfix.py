@@ -13,9 +13,10 @@ import random
 import re
 import tempfile
 from collections import OrderedDict
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from dataclasses import replace as copy_row
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -24,10 +25,12 @@ import discord
 from discord.ext import commands
 
 from bb import ehentai, render, rerun, strings, upload, views
+from bb.brake import BurstBrake
 from bb.db import PostRow, RepostRow
 from bb.links import extract, resolve, sites
 from bb.links.model import Fixer, LinkMatch
 from bb.settings_store import GuildSettings
+from bb.timeutil import now
 
 if TYPE_CHECKING:
     from bb.bot import BBBot
@@ -35,8 +38,15 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MAX_LINKS = 4  # fixed links per message
+# BB only acts on messages younger than this. Older ones she handled back then still follow real edits;
+# an edit only adds reposts to an old message if the edit itself is this recent (see process).
+FRESH_FOR = 15 * 60
 MAX_SCANNED = 10  # URLs looked at per message (bounds short-link expansion)
 EMBED_TIMEOUT = 6.0
+# A fixer link the poster sent themselves can preview slowly (fixvx redirects to vxtwitter): give it
+# longer before deciding it's dead. 15s is a guess; retractions log the real delays.
+RESCUE_TIMEOUT = 15.0
+LATE_PREVIEW_WINDOW = 5 * 60  # after a rescue, how long a late preview on the original still undoes it
 RESUPPRESS_DELAY = 1.0
 WEBHOOK_NAME = "BB"
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
@@ -67,6 +77,17 @@ def should_handle(
     if is_webhook and not settings.fix_webhooks:
         return False
     return channel_allowed(settings, channel_id, parent_id)
+
+
+def is_history(created_at: float, now_ts: float) -> bool:
+    return now_ts - created_at > FRESH_FOR
+
+
+def edited_recently(message: Any, now_ts: float) -> bool:
+    """The message carries an edit from the last FRESH_FOR seconds (pins and refreshed previews keep the
+    old edited_at, or none)."""
+    edited = getattr(message, "edited_at", None)
+    return edited is not None and now_ts - edited.timestamp() <= FRESH_FOR
 
 
 def is_already_fixed(m: LinkMatch) -> bool:
@@ -129,16 +150,37 @@ def settle_quip(current: str | None, *, is_rerun: bool, outcome: Literal["upload
     return strings.line(f"quip.{outcome}")
 
 
-def embeds_have_image(embeds: Iterable[dict[str, Any]]) -> bool:
-    """True if a preview shows a still image (an image, or a thumbnail on a non-video embed)."""
-    for embed in embeds:
-        if (embed.get("image") or {}).get("url"):
-            return True
-        if embed.get("video") or embed.get("type") in ("video", "gifv"):
-            continue
-        if (embed.get("thumbnail") or {}).get("url"):
-            return True
-    return False
+# Sites where the Find source button is worth having: art there is mostly reposted without credit. On
+# tweets and Pixiv the post usually *is* the source. (The right-click "Find source" works everywhere.)
+FIND_SOURCE_SITES = frozenset({"reddit", "bluesky", "instagram"})
+
+# Twitter's language codes for tweets with no real text (media only, emoji, hashtags, ...).
+NO_TEXT_LANGS = frozenset({"zxx", "und", "qme", "qam", "qct", "qht", "qst"})
+
+
+def translate_offered(tweet: dict[str, Any] | None, target: str) -> bool:
+    """Translate for tweets in another language; if FxTwitter didn't answer, offer it anyway."""
+    return True if tweet is None else offer_translation(tweet.get("lang"), target, tweet.get("text"))
+
+
+# Twitter's language guess is unreliable on a few Latin-script words ("gem alert" came back as German),
+# so for Latin-script text it's only trusted once there's a real sentence to judge.
+MIN_LATIN_LETTERS = 20
+
+
+def offer_translation(lang: str | None, target: str, text: str | None = None) -> bool:
+    """Translate is only offered for text in another language than the server's translation language."""
+    if not lang or lang.lower() in NO_TEXT_LANGS:
+        return False
+    if lang.lower().split("-")[0] == target.lower().split("-")[0]:
+        return False
+    if text is None:
+        return True
+    letters = [ch for ch in text if ch.isalpha()]
+    non_latin = sum(1 for ch in letters if ord(ch) >= 0x250)  # past Latin + Latin Extended
+    if non_latin:
+        return True  # Japanese, Korean, Cyrillic, ...: a few characters are unambiguous
+    return len(letters) >= MIN_LATIN_LETTERS
 
 
 def diff_keys(old_keys: set[str], matches: list[LinkMatch]) -> tuple[set[str], list[LinkMatch]]:
@@ -236,6 +278,28 @@ class LiveRepost:
     sent: Sent
     is_rerun: bool
     max_bytes: int
+    # What a replacement message needs (see _replace): the original it answers, its settings, its buttons.
+    origin: Any = None
+    settings: GuildSettings | None = None
+    view: Any = None
+
+
+# Attachments are rebuilt for every send attempt: discord.py closes a File once a send ends, even a
+# failed one, so the same File objects can't go out twice.
+MakeFiles = Callable[[], list[discord.File]]
+
+
+class RepostGone(Exception):
+    """The repost, or the message it answers, was deleted while BB was still working on it."""
+
+
+def _changes(content: str, view: Any, make_files: MakeFiles | None) -> dict[str, Any]:
+    changes: dict[str, Any] = {"content": content}
+    if view is not None:
+        changes["view"] = view
+    if make_files is not None:
+        changes["attachments"] = make_files()
+    return changes
 
 
 def _embed_dicts(message: Any) -> list[dict[str, Any]]:
@@ -246,15 +310,46 @@ def _parent_id(channel: Any) -> int | None:
     return channel.parent_id if isinstance(channel, discord.Thread) else None
 
 
+def fixer_preview_keys(embeds: Iterable[dict[str, Any]]) -> set[str]:
+    """Which links a batch of previews came from a fixer for. Matched by canonical key, not host
+    (fixvx.com previews arrive with vxtwitter.com URLs). A site's own preview (x.com's poor card)
+    doesn't count: it's no substitute for BB's fix."""
+    keys: set[str] = set()
+    for embed in embeds:
+        url = embed.get("url")
+        m = sites.match(url) if url else None
+        if m is not None and is_already_fixed(m):
+            keys.add(m.canonical_key)
+    return keys
+
+
+@dataclass
+class RescueWatch:
+    """A rescued message whose own preview may still show up late."""
+
+    keys: set[str]  # rescued links still being watched
+    posted_at: float
+    deadline: float
+    seen: set[str]  # rescued links whose late preview has arrived
+    # link key -> the one repost BB may take down for it. Only silent rescues: a repost roast or the
+    # rare line is something BB said, and stays up.
+    reposts: dict[str, int] = field(default_factory=dict)
+    settled: bool = False  # BB's reposts are done settling; safe to delete them now
+
+
 class LinkFix(commands.Cog):
     def __init__(self, bot: BBBot) -> None:
         self.bot = bot
         self.embed_timeout = EMBED_TIMEOUT
+        self.rescue_timeout = RESCUE_TIMEOUT
+        self._rare_lock = asyncio.Lock()
+        self.brake = BurstBrake()
         self.resuppress_delay = RESUPPRESS_DELAY
         self._locks: dict[int, asyncio.Lock] = {}
         self._lock_users: dict[int, int] = {}
         self._embed_waiters: dict[int, asyncio.Future[list[dict[str, Any]]]] = {}
         self._recent_embeds: OrderedDict[int, list[dict[str, Any]]] = OrderedDict()
+        self._rescue_watches: OrderedDict[int, RescueWatch] = OrderedDict()  # by original message id
         self._webhooks: dict[int, discord.Webhook] = {}  # parent channel id -> BB's webhook there
         self._webhook_lock = asyncio.Lock()
         self._expected_deletes = RecentIds()  # originals BB deleted itself (original_action = delete)
@@ -314,6 +409,8 @@ class LinkFix(commands.Cog):
             return
         async with self.message_lock(message.id):
             settings = await self.bot.settings.get(guild.id)
+            if settings.paused:
+                return
             if not should_handle(
                 settings,
                 channel_id=message.channel.id,
@@ -325,6 +422,10 @@ class LinkFix(commands.Cog):
             old_keys = await db.post_keys_for_message(message.id)
             if old_keys and not edit:
                 return  # already handled (duplicate event)
+            if not old_keys and is_history(message.created_at.timestamp(), now()):
+                # Never touch old messages BB didn't handle when they were new, whatever the event says
+                # (edit events for scrolled-to history, replays after a reconnect, ...).
+                return
             cards = 0
             if is_skipped(message.content, settings.skip_word):
                 if not edit:
@@ -337,6 +438,14 @@ class LinkFix(commands.Cog):
             # Cards aren't edit-synced: an edit that doesn't touch the gallery link shouldn't drop its card.
             link_keys = {key for key in old_keys if not key.startswith(f"{ehentai.SITE_ID}:")}
             removed, added = diff_keys(link_keys, matches)
+            ts = now()
+            if added and edit and is_history(message.created_at.timestamp(), ts) and not edited_recently(
+                message, ts
+            ):
+                # An event on an old message that isn't a fresh edit (a misread pin, a refresh) can take a
+                # link away, but never brings new reposts into old history.
+                log.info("edit on old message %s: not fixing %d new link(s)", message.id, len(added))
+                added = []
             for key in removed:
                 await self._remove_link(message.id, key)
             if not added:
@@ -363,28 +472,33 @@ class LinkFix(commands.Cog):
             if action != "nothing":
                 await self._apply_original(message, action)
 
-    async def delete_repost_message(self, row: RepostRow) -> None:
-        """Delete one of BB's reposts from Discord (the DB row is the caller's business)."""
+    async def delete_repost_message(self, row: RepostRow) -> bool:
+        """Delete one of BB's reposts from Discord (the DB row is the caller's business).
+        True when it's gone (or already was)."""
         channel = self.bot.get_partial_messageable(row.channel_id, guild_id=row.guild_id)
         try:
             await channel.get_partial_message(row.repost_id).delete()
-            return
+            return True
         except discord.NotFound:
-            return
+            return True
         except discord.HTTPException as exc:
             if not row.via_webhook:
                 log.warning("could not delete repost %s: %s", row.repost_id, exc)
-                return
+                return False
         hook = next((h for h in self._webhooks.values() if h.id == row.webhook_id), None)
         if hook is None:
             log.warning("could not delete webhook repost %s: webhook not cached", row.repost_id)
-            return
+            return False
         in_thread = hook.channel_id != row.channel_id
         thread = discord.Object(row.channel_id) if in_thread else discord.utils.MISSING
         try:
             await hook.delete_message(row.repost_id, thread=thread)
+        except discord.NotFound:
+            return True
         except discord.HTTPException as exc:
             log.warning("could not delete webhook repost %s: %s", row.repost_id, exc)
+            return False
+        return True
 
     # --- listeners ------------------------------------------------------------------------
 
@@ -404,9 +518,15 @@ class LinkFix(commands.Cog):
         if not embeds:
             return
         waiter = self._embed_waiters.get(payload.message_id)
-        if waiter is not None:
-            if not waiter.done():
-                waiter.set_result(list(embeds))
+        watch = self._rescue_watches.get(payload.message_id)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(list(embeds))
+        if watch is not None:  # also while waiting: an edit can start a second rescue on the same message
+            try:
+                await self._note_late_preview(payload.message_id, watch, embeds)
+            except Exception:
+                log.exception("undoing a rescue failed for message %s", payload.message_id)
+        if waiter is not None or watch is not None:
             return
         if self._is_own_message(payload.data):
             # The preview can land before send() returns; keep it for the waiter that comes next.
@@ -485,10 +605,11 @@ class LinkFix(commands.Cog):
         """choose_quip, plus the armed rare line: used once on the next link (not over a repost roast)."""
         guild = message.guild
         if guild is not None and not rerun_line:
-            current = await self.bot.settings.get(guild.id)  # fresh: an earlier link may have used it
-            if current.rare_armed and current.rare_text:
-                await self.bot.settings.update(guild.id, rare_armed=False)
-                return rare_line(current)
+            async with self._rare_lock:  # two links at once must not both use the one-shot line
+                current = await self.bot.settings.get(guild.id)  # fresh: an earlier link may have used it
+                if current.rare_armed and current.rare_text:
+                    await self.bot.settings.update(guild.id, rare_armed=False)
+                    return rare_line(current)
         return choose_quip(settings, rerun_line=rerun_line, site_name=site_name, channel_id=channel_id)
 
     async def _settle_all(self, live: list[LiveRepost]) -> list[str]:
@@ -514,16 +635,89 @@ class LinkFix(commands.Cog):
         on the message at all (a dead meme domain). Then BB fixes them like any other link."""
         if not already_fixed:
             return []
-        previewed = _embed_dicts(message) or await self._wait_for_embeds(message.id) or _embed_dicts(message)
+        previewed = (
+            _embed_dicts(message)
+            or await self._wait_for_embeds(message.id, seconds=self.rescue_timeout)
+            or _embed_dicts(message)
+        )
         if previewed or message.id in self._deleted_origins:
             return []
-        live: list[LiveRepost] = []
-        for m, rerun_line in already_fixed:
-            log.info("no preview for %s on message %s; fixing it", m.url, message.id)
-            repost = await self._repost(message, settings, m, rerun_line, quip_channel=quip_channel)
-            if repost is not None:
-                live.append(repost)
-        return await self._settle_all(live)
+        watch = self._watch_rescue(message, {m.canonical_key for m, _ in already_fixed})
+        try:
+            live: list[LiveRepost] = []
+            silent: list[tuple[str, LiveRepost]] = []
+            for m, rerun_line in already_fixed:
+                log.info("no preview for %s on message %s; fixing it", m.url, message.id)
+                repost = await self._repost(message, settings, m, rerun_line, quip_channel=quip_channel)
+                if repost is not None:
+                    live.append(repost)
+                    if repost.row.quip is None:
+                        silent.append((m.canonical_key, repost))
+            outcomes = await self._settle_all(live)
+            for key, repost in silent:  # after settling: a fixer switch replaces the message (new id)
+                watch.reposts[key] = repost.row.repost_id
+        finally:
+            watch.settled = True
+        try:
+            await self._undo_rescues(message.id)  # a late preview that landed while BB was still settling
+        except Exception:
+            log.exception("undoing a rescue failed for message %s", message.id)
+        return outcomes
+
+    def _watch_rescue(self, message: discord.Message, keys: set[str]) -> RescueWatch:
+        watch = self._rescue_watches.get(message.id)
+        if watch is not None and now() <= watch.deadline:
+            # an edit rescued more links on the same message: keep watching the first ones too
+            watch.keys |= keys
+            watch.deadline = now() + LATE_PREVIEW_WINDOW
+            watch.settled = False
+            return watch
+        watch = RescueWatch(
+            keys=set(keys), posted_at=message.created_at.timestamp(),
+            deadline=now() + LATE_PREVIEW_WINDOW, seen=set(),
+        )
+        self._rescue_watches[message.id] = watch
+        while len(self._rescue_watches) > 256:
+            self._rescue_watches.popitem(last=False)
+        return watch
+
+    async def _note_late_preview(
+        self, origin_id: int, watch: RescueWatch, embeds: list[dict[str, Any]]
+    ) -> None:
+        if now() > watch.deadline:
+            self._rescue_watches.pop(origin_id, None)
+            return
+        watch.seen |= fixer_preview_keys(embeds) & watch.keys
+        if watch.settled and watch.seen:
+            async with self.message_lock(origin_id):
+                await self._undo_rescues(origin_id)
+
+    async def _undo_rescues(self, origin_id: int) -> None:
+        """The original's own preview showed up after all, so BB's rescue repost is a duplicate: take it
+        down. Only the exact repost the rescue made, never another one for the same link. The post
+        record stays, so repost roasts still know about the link."""
+        watch = self._rescue_watches.get(origin_id)
+        if watch is None or not watch.seen:
+            return
+        db = self.bot.db
+        done: set[str] = set()
+        for key in sorted(watch.seen):
+            repost_id = watch.reposts.get(key)
+            row = await db.get_repost(repost_id) if repost_id is not None else None
+            if row is not None:  # None: it said something (kept on purpose), or it's already gone
+                log.info(
+                    "late preview for %s on message %s, %.0fs after it was posted; taking BB's repost down",
+                    row.original_url, origin_id, now() - watch.posted_at,
+                )
+                if not await self.delete_repost_message(row):
+                    continue  # still up: keep watching, the next preview update retries
+                await db.delete_repost(row.repost_id)
+            watch.reposts.pop(key, None)
+            done.add(key)
+        watch.keys -= done
+        watch.seen.clear()
+        if not watch.keys:
+            self._rescue_watches.pop(origin_id, None)
 
     async def _check_rerun(
         self, message: discord.Message, settings: GuildSettings, m: LinkMatch
@@ -562,6 +756,9 @@ class LinkFix(commands.Cog):
     ) -> LiveRepost | None:
         guild = message.guild
         assert guild is not None
+        if not self.brake.allow(guild.id, message.channel.id):
+            return None
+        tweet = await self._tweet_info(m) if m.site.id == "twitter" else None
         fixers = list(sites.chain(m.site.id, self.bot.down_fixers))
         first = fixers[0] if fixers else None
         if first is not None:
@@ -569,7 +766,10 @@ class LinkFix(commands.Cog):
         else:
             content = render.format_upload(m, quip)
         view = views.make_repost_view(
-            site_id=m.site.id, origin_author_id=message.author.id, original_url=sites.source_url(m)
+            site_id=m.site.id,
+            origin_author_id=message.author.id,
+            has_image=await self._predict_image(m),
+            translatable=m.site.id == "twitter" and translate_offered(tweet, settings.translate_lang),
         )
         try:
             sent = await self._send_message(message, settings, content, view)
@@ -593,7 +793,8 @@ class LinkFix(commands.Cog):
         )
         await self.bot.db.insert_repost(row)
         repost = LiveRepost(
-            row=row, match=m, chain=fixers, sent=sent, is_rerun=is_rerun, max_bytes=guild.filesize_limit
+            row=row, match=m, chain=fixers, sent=sent, is_rerun=is_rerun, max_bytes=guild.filesize_limit,
+            origin=message, settings=settings, view=view,
         )
         if message.id in self._deleted_origins:
             await self._drop(repost)
@@ -604,7 +805,7 @@ class LinkFix(commands.Cog):
         """Wait for the preview, walk the fixer chain, then upload or give up. Returns the final status."""
         try:
             return await self._walk_chain(repost)
-        except discord.NotFound:
+        except (discord.NotFound, RepostGone):
             await self.bot.db.delete_repost(repost.row.repost_id)  # someone deleted it mid-fix
             return "gone"
 
@@ -619,35 +820,42 @@ class LinkFix(commands.Cog):
             if index > 0:
                 self._recent_embeds.pop(row.repost_id, None)
                 content = render.format_repost(m, fixer.name, sites.fixed_url(m, fixer), row.quip)
-                edited = await self._edit(repost, content=content)
                 row.fixer_id = fixer.id
+                edited = await self._replace(repost, content=content)
                 await db.update_repost(row.repost_id, fixer_id=fixer.id)
                 embeds = _embed_dicts(edited)
             if not embeds:
                 embeds = await self._wait_for_embeds(row.repost_id)
+            if embeds and row.origin_message_id in self._deleted_origins:
+                await self._drop(repost)
+                return "gone"
             if embeds:
                 row.status = "ok"
                 await db.update_repost(row.repost_id, status="ok")
-                if embeds_have_image(embeds):
-                    await self._add_find_source(repost)
                 return "ok"
         if row.origin_message_id in self._deleted_origins:
             await self._drop(repost)
             return "gone"
         return await self._upload_fallback(repost)
 
-    async def _add_find_source(self, repost: LiveRepost) -> None:
-        current = await self.bot.db.get_repost(repost.row.repost_id)
-        if current is None:
-            return
-        view = views.make_repost_view(
-            site_id=current.site,
-            origin_author_id=current.origin_author_id,
-            translated=current.translated,
-            has_image=True,
-            original_url=sites.source_url(repost.match),
-        )
-        await self._edit(repost, view=view)
+    async def _tweet_info(self, m: LinkMatch) -> dict[str, Any] | None:
+        """The tweet as FxTwitter's API describes it (for its language), fetched before sending so nothing
+        needs an edit later. None if it doesn't answer in time."""
+        if "id" not in m.parts:
+            return None
+        url = f"https://api.fxtwitter.com/{m.parts.get('user') or 'i'}/status/{m.parts['id']}"
+        try:
+            async with self.bot.http_client.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                if resp.status != 200:
+                    return None
+                return (await resp.json(content_type=None)).get("tweet") or None
+        except (aiohttp.ClientError, TimeoutError, ValueError):
+            return None
+
+    async def _predict_image(self, m: LinkMatch) -> bool:
+        """Whether this repost gets a Find source button. Decided before sending, so the button never has to
+        be added by an edit (Discord marks any edit "(edited)")."""
+        return m.site.id in FIND_SOURCE_SITES
 
     async def _upload_fallback(self, repost: LiveRepost) -> str:
         db = self.bot.db
@@ -658,38 +866,38 @@ class LinkFix(commands.Cog):
             )
             if media:
                 quip = settle_quip(row.quip, is_rerun=repost.is_rerun, outcome="uploaded")
-                files = [discord.File(f.path, filename=f.filename, spoiler=m.spoiler) for f in media]
+
+                def make_files() -> list[discord.File]:
+                    return [discord.File(f.path, filename=f.filename, spoiler=m.spoiler) for f in media]
+
                 view = views.make_repost_view(
                     site_id=m.site.id,
                     origin_author_id=row.origin_author_id,
                     translated=False,
-                    has_image=any(is_image_file(f.filename) for f in media),
-                    original_url=sites.source_url(m),
+                    has_image=m.site.id in FIND_SOURCE_SITES
+                    and any(is_image_file(f.filename) for f in media),
+                    translatable=False,  # an upload has no fixer link to translate
                 )
-                try:
-                    await self._edit(
-                        repost, content=render.format_upload(m, quip), attachments=files, view=view
-                    )
-                finally:
-                    for file in files:
-                        file.close()
+                await self._replace(
+                    repost, content=render.format_upload(m, quip), make_files=make_files, view=view
+                )
                 row.status, row.quip, row.fixer_id = "uploaded", quip, None
                 await db.update_repost(row.repost_id, status="uploaded", quip=quip, fixer_id=None)
                 return "uploaded"
         quip = settle_quip(row.quip, is_rerun=repost.is_rerun, outcome="failed")
-        await self._edit(repost, content=render.format_upload(m, quip))
+        await self._replace(repost, content=render.format_upload(m, quip))
         row.status, row.quip, row.fixer_id = "failed", quip, None
         await db.update_repost(row.repost_id, status="failed", quip=quip, fixer_id=None)
         return "failed"
 
-    async def _wait_for_embeds(self, repost_id: int) -> list[dict[str, Any]]:
+    async def _wait_for_embeds(self, repost_id: int, *, seconds: float | None = None) -> list[dict[str, Any]]:
         early = self._recent_embeds.pop(repost_id, None)
         if early:
             return early
         future: asyncio.Future[list[dict[str, Any]]] = asyncio.get_running_loop().create_future()
         self._embed_waiters[repost_id] = future
         try:
-            return await asyncio.wait_for(future, self.embed_timeout)
+            return await asyncio.wait_for(future, self.embed_timeout if seconds is None else seconds)
         except TimeoutError:
             return []
         finally:
@@ -751,6 +959,8 @@ class LinkFix(commands.Cog):
             quip = await self._choose_quip(
                 message, settings, rerun_line=rerun_line, site_name=ehentai.SITE.name, channel_id=quip_channel
             )
+            if not self.brake.allow(guild.id, message.channel.id):
+                continue
             view = ehentai.build_card(meta, gallery, cover=cover, quip=quip)
             try:
                 sent = await self._send_card(message, settings, view, cover, quip=quip)
@@ -795,23 +1005,44 @@ class LinkFix(commands.Cog):
         )
 
     async def _send_message(
-        self, message: discord.Message, settings: GuildSettings, content: str, view: discord.ui.View
+        self,
+        message: discord.Message,
+        settings: GuildSettings,
+        content: str,
+        view: discord.ui.View,
+        *,
+        make_files: MakeFiles | None = None,
+        quiet: bool = False,
     ) -> Sent:
+        """quiet: ping nobody at all (a replacement for a message that already did)."""
         if settings.reply_mode == "webhook":
-            sent = await self._send_as_poster(message, settings, content, view)
+            sent = await self._send_as_poster(
+                message, settings, content, view, make_files=make_files, quiet=quiet
+            )
             if sent is not None:
                 return sent
+        extra: dict[str, Any] = {"files": make_files()} if make_files is not None else {}
         reply = await message.channel.send(
             content,
             reference=message.to_reference(fail_if_not_exists=False),
             view=view,
-            allowed_mentions=send_mentions(settings, content, reply=True),
-            silent=settings.silent and not pings_target(settings, content),
+            allowed_mentions=(
+                discord.AllowedMentions.none() if quiet else send_mentions(settings, content, reply=True)
+            ),
+            silent=quiet or (settings.silent and not pings_target(settings, content)),
+            **extra,
         )
         return Sent(message=reply)
 
     async def _send_as_poster(
-        self, message: discord.Message, settings: GuildSettings, content: str, view: discord.ui.View
+        self,
+        message: discord.Message,
+        settings: GuildSettings,
+        content: str,
+        view: discord.ui.View,
+        *,
+        make_files: MakeFiles | None = None,
+        quiet: bool = False,
     ) -> Sent | None:
         """Copy-the-poster mode. None means "use reply mode instead" (no permission, odd channel...)."""
         thread = message.channel if isinstance(message.channel, discord.Thread) else None
@@ -826,8 +1057,13 @@ class LinkFix(commands.Cog):
                     avatar_url=message.author.display_avatar.url,
                     view=view,
                     thread=thread if thread is not None else discord.utils.MISSING,
-                    allowed_mentions=send_mentions(settings, content, reply=False),
-                    silent=settings.silent and not pings_target(settings, content),
+                    allowed_mentions=(
+                        discord.AllowedMentions.none()
+                        if quiet
+                        else send_mentions(settings, content, reply=False)
+                    ),
+                    silent=quiet or (settings.silent and not pings_target(settings, content)),
+                    files=make_files() if make_files is not None else discord.utils.MISSING,
                     wait=True,
                 )
                 return Sent(message=sent, webhook=hook, thread=thread)
@@ -859,6 +1095,53 @@ class LinkFix(commands.Cog):
                 return None
             self._webhooks[parent.id] = hook
             return hook
+
+    async def _replace(
+        self,
+        repost: LiveRepost,
+        *,
+        content: str,
+        view: Any = None,
+        make_files: MakeFiles | None = None,
+    ) -> Any:
+        """Swap a repost for a fresh message instead of editing it: Discord marks every edit "(edited)".
+        The new one goes out first, so the channel never shows a gap, and pings nobody (the first one
+        already did). If BB can't send it, she edits after all: a label beats a stuck repost.
+        Raises RepostGone if the repost or its original was deleted meanwhile; nothing comes back."""
+        row = repost.row
+        db = self.bot.db
+        if await db.get_repost(row.repost_id) is None:
+            raise RepostGone  # someone deleted it: don't bring it back
+        if repost.origin is None or repost.settings is None:
+            return await self._edit(repost, **_changes(content, view, make_files))
+        old = copy_row(row)  # the message to delete afterwards
+        try:
+            sent = await self._send_message(
+                repost.origin, repost.settings, content, view or repost.view,
+                make_files=make_files, quiet=True,
+            )
+        except discord.HTTPException as exc:
+            log.warning("could not replace repost %s, editing it instead: %s", row.repost_id, exc)
+            return await self._edit(repost, **_changes(content, view, make_files))
+        row.repost_id = sent.message.id
+        row.via_webhook = sent.webhook is not None
+        row.webhook_id = sent.webhook.id if sent.webhook is not None else None
+        repost.sent = sent
+        if view is not None:
+            repost.view = view
+        await db.insert_repost(row)
+        if row.origin_message_id in self._deleted_origins or await db.get_repost(old.repost_id) is None:
+            # The original, or the old repost, was deleted while the new one was on its way: it goes too.
+            await self.delete_repost_message(row)
+            await db.delete_repost(row.repost_id)
+            raise RepostGone
+        if await self.delete_repost_message(old):
+            await db.delete_repost(old.repost_id)
+        else:  # still up: keep tracking it, so edits and deletes of the original still reach it
+            log.warning(
+                "replaced repost %s, but its old message %s is still up", row.repost_id, old.repost_id
+            )
+        return sent.message
 
     async def _edit(self, repost: LiveRepost, **changes: Any) -> Any:
         """Edit a repost; webhook reposts go through their webhook (with thread= inside threads)."""

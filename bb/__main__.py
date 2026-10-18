@@ -35,6 +35,9 @@ def main() -> int:
 
     config = Config.from_env()
     discord.utils.setup_logging(level=getattr(logging, config.log_level, logging.INFO), root=True)
+    # discord.py's own DEBUG output includes webhook URLs (with their tokens) and request payloads:
+    # LOG_LEVEL=DEBUG is for BB's logs only.
+    logging.getLogger("discord").setLevel(max(logging.getLogger().level, logging.INFO))
 
     if args.check:
         return asyncio.run(_check(config))

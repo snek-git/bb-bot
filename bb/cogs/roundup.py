@@ -100,6 +100,9 @@ def build_embed(lines: list[Line], ts: float | None = None) -> discord.Embed:
 class Roundup(commands.Cog):
     def __init__(self, bot: Any) -> None:
         self.bot = bot
+        # guild id -> last roundup handled this run. Checked alongside the saved value, so a failed save
+        # can't make every tick post the roundup again.
+        self._sent: dict[int, float] = {}
 
     async def cog_load(self) -> None:
         self.tick.start()
@@ -123,9 +126,10 @@ class Roundup(commands.Cog):
     async def maybe_post(self, guild: Any, ts: float) -> bool:
         """Post this server's roundup if it's due. Returns True if one was sent."""
         s = await self.bot.settings.get(guild.id)
-        if not s.roundup_channel_id:
+        if s.paused or not s.roundup_channel_id:
             return False
-        if not roundup_due(ts, s.timezone, s.roundup_weekday, s.roundup_hour, s.roundup_last_sent):
+        last_sent = max(s.roundup_last_sent, self._sent.get(guild.id, 0.0))
+        if not roundup_due(ts, s.timezone, s.roundup_weekday, s.roundup_hour, last_sent):
             return False
         channel = guild.get_channel_or_thread(s.roundup_channel_id)
         if channel is None:
@@ -164,6 +168,7 @@ class Roundup(commands.Cog):
         return build_embed(roundup_content(posters, top, offenders, brainlet_award), ts)
 
     async def _mark_sent(self, guild_id: int, ts: float) -> None:
+        self._sent[guild_id] = ts  # first: the save below can fail
         await self.bot.settings.update(guild_id, roundup_last_sent=ts)
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from urllib.parse import unquote
@@ -70,13 +71,9 @@ def test_parse_saucenao_handles_errors_and_junk(data):
 def test_format_results():
     results = fs.parse_saucenao(RESPONSE)
     text = fs.format_results(results)
-    lines = text.splitlines()
-    assert lines[0] in [
-        strings.fill(v, similarity="93.2", source="Pixiv Images")
-        for v in strings.variants("findsource.found")
-    ]
-    assert lines[1] == "- [Pixiv Images](<https://www.pixiv.net/artworks/1234>) 93.2%"
-    assert lines[3] == "- [gelbooru.com](<https://gelbooru.com/index.php?id=7>) 75%"
+    lines = text.splitlines()  # plain results, no BB line on top
+    assert lines[0] == "- [Pixiv Images](<https://www.pixiv.net/artworks/1234>) 93.2%"
+    assert lines[2] == "- [gelbooru.com](<https://gelbooru.com/index.php?id=7>) 75%"
     assert fs.format_results([]) in strings.variants("findsource.none")
 
 
@@ -85,7 +82,7 @@ def test_format_results():
 
 def test_engine_links_encode_the_image_url():
     links = dict(fs.engine_links(IMG))
-    assert list(links) == ["ascii2d", "IQDB", "Yandex", "Google Lens"]
+    assert list(links) == ["SauceNAO", "ascii2d", "IQDB", "Yandex", "Google Lens"]
     assert links["ascii2d"].startswith("https://ascii2d.net/search/url/https%3A%2F%2Fpbs.twimg.com")
     assert links["IQDB"].startswith("https://iqdb.org/?url=")
     assert links["Yandex"].startswith("https://yandex.com/images/search?rpt=imageview&url=")
@@ -104,7 +101,7 @@ def test_engine_links_skip_urls_too_long_for_buttons():
 
 async def test_links_view_has_link_buttons():
     view = fs.links_view(IMG)
-    assert [item.label for item in view.children] == ["ascii2d", "IQDB", "Yandex", "Google Lens"]
+    assert [item.label for item in view.children] == ["SauceNAO", "ascii2d", "IQDB", "Yandex", "Google Lens"]
     assert all(item.url for item in view.children)
 
 
@@ -176,14 +173,23 @@ async def test_search_saucenao_failures_return_none(status, data):
 # --- the cog ----------------------------------------------------------------------------
 
 
-def make_cog(key="KEY"):
-    bot = SimpleNamespace(config=SimpleNamespace(saucenao_key=key), http_client=object(), tree=None)
+def make_cog(key="KEY", paused=False):
+    settings = SimpleNamespace(get=AsyncMock(return_value=SimpleNamespace(paused=paused)))
+    bot = SimpleNamespace(
+        config=SimpleNamespace(saucenao_key=key), http_client=object(), tree=None, settings=settings
+    )
     return fs.FindSource(bot)
 
 
-def make_interaction():
+_users = itertools.count(1)
+
+
+def make_interaction(user_id=None):
     response = SimpleNamespace(send_message=AsyncMock(), defer=AsyncMock())
-    return SimpleNamespace(response=response, followup=SimpleNamespace(send=AsyncMock()))
+    user = SimpleNamespace(id=next(_users) if user_id is None else user_id)
+    return SimpleNamespace(
+        response=response, followup=SimpleNamespace(send=AsyncMock()), guild_id=1, user=user
+    )
 
 
 async def test_run_without_image_answers_privately():
@@ -206,7 +212,7 @@ async def test_run_posts_results_publicly_and_caches(monkeypatch):
         args, kwargs = interaction.followup.send.await_args
         assert "pixiv.net/artworks/1234" in args[0]
         assert "ephemeral" not in kwargs
-        assert [item.label for item in kwargs["view"].children][0] == "ascii2d"
+        assert [item.label for item in kwargs["view"].children][0] == "SauceNAO"
     search.assert_awaited_once()
 
 
@@ -216,18 +222,53 @@ async def test_run_without_key_only_links(monkeypatch):
     interaction = make_interaction()
     await make_cog(key=None).run(interaction, SimpleNamespace(attachments=[], embeds=[embed(image=IMG)]))
     search.assert_not_awaited()
-    args, kwargs = interaction.followup.send.await_args
-    assert args[0] in strings.variants("findsource.none")
-    assert len(kwargs["view"].children) == 4
+    interaction.response.defer.assert_not_awaited()  # nothing to wait for: answer straight away
+    args, kwargs = interaction.response.send_message.await_args
+    assert args[0] in strings.variants("findsource.manual")  # honest: no search happened, so not "no matches"
+    assert "ephemeral" not in kwargs and len(kwargs["view"].children) == 5
+
+
+async def test_one_search_per_person_per_cooldown(monkeypatch):
+    # Every search posts publicly: a person mashing buttons gets told off privately, once BB answered.
+    search = AsyncMock(return_value=fs.parse_saucenao(RESPONSE))
+    monkeypatch.setattr(fs, "search_saucenao", search)
+    cog = make_cog()
+    message = SimpleNamespace(attachments=[], embeds=[embed(image=IMG)])
+    first, second, other = make_interaction(7), make_interaction(7), make_interaction(8)
+    for interaction in (first, second, other):
+        await cog.run(interaction, message)
+    first.followup.send.assert_awaited_once()
+    second.followup.send.assert_not_awaited()
+    args, kwargs = second.response.send_message.await_args
+    assert args[0] in strings.variants("findsource.cooldown") and kwargs["ephemeral"] is True
+    other.followup.send.assert_awaited_once()  # someone else isn't held up
+
+
+async def test_paused_bb_does_not_search(monkeypatch):
+    search = AsyncMock()
+    monkeypatch.setattr(fs, "search_saucenao", search)
+    interaction = make_interaction()
+    await make_cog(paused=True).run(interaction, SimpleNamespace(attachments=[], embeds=[embed(image=IMG)]))
+    search.assert_not_awaited()
+    args, kwargs = interaction.response.send_message.await_args
+    assert args[0] in strings.variants("findsource.paused") and kwargs["ephemeral"] is True
 
 
 async def test_failed_lookup_is_not_cached(monkeypatch):
     search = AsyncMock(return_value=None)
     monkeypatch.setattr(fs, "search_saucenao", search)
     cog = make_cog()
-    assert await cog.lookup(IMG) == []
-    assert await cog.lookup(IMG) == []
+    assert await cog.lookup(IMG) is None  # couldn't search: not the same as "no matches"
+    assert await cog.lookup(IMG) is None
     assert search.await_count == 2
+
+
+async def test_failed_search_says_so(monkeypatch):
+    monkeypatch.setattr(fs, "search_saucenao", AsyncMock(return_value=None))
+    interaction = make_interaction()
+    await make_cog().run(interaction, SimpleNamespace(attachments=[], embeds=[embed(image=IMG)]))
+    args, _ = interaction.followup.send.await_args
+    assert args[0] in strings.variants("findsource.manual")
 
 
 async def test_context_menu_is_registered_and_removed():

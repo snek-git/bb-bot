@@ -254,7 +254,7 @@ class Health(commands.Cog):
         """Send text to every server's alerts channel, if it has one."""
         for guild in list(self.bot.guilds):
             settings = await self.bot.settings.get(guild.id)
-            if not settings.alerts_channel_id:
+            if settings.paused or not settings.alerts_channel_id:
                 continue
             channel = guild.get_channel_or_thread(settings.alerts_channel_id)
             if channel is None or not hasattr(channel, "send"):

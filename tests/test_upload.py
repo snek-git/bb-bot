@@ -61,6 +61,12 @@ class Http:
         return self.base + path
 
 
+@pytest.fixture(autouse=True)
+def local_hosts_allowed(monkeypatch):
+    """The fake servers here live on 127.0.0.1, which the real guard refuses (see the guard tests)."""
+    monkeypatch.setattr(upload, "ALLOW_PRIVATE_HOSTS", True)
+
+
 @pytest.fixture
 async def http():
     routes: dict = {}
@@ -828,3 +834,56 @@ async def test_unreachable_apis_return_empty(local, tmp_path, ytdlp):
     ]:
         assert await fetch(local, match(site, key), tmp_path) == []
     assert ytdlp.calls == ["https://x.com/i/status/1", "https://www.reddit.com/comments/r1/"]
+
+
+# --- the public-address guard ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("url", "public"),
+    [
+        ("http://127.0.0.1:8123/", False),
+        ("http://172.17.0.1/", False),  # the Docker host
+        ("http://192.168.1.1/admin", False),
+        ("http://169.254.169.254/latest/meta-data/", False),  # cloud metadata
+        ("http://[::1]/", False),
+        ("http://localhost/", False),
+        ("ftp://1.1.1.1/x.jpg", False),
+        ("https://1.1.1.1/x.jpg", True),
+    ],
+)
+async def test_public_url_guard(monkeypatch, url, public):
+    monkeypatch.setattr(upload, "ALLOW_PRIVATE_HOSTS", False)
+    assert await upload._public_url(url) is public
+
+
+async def test_redirect_into_the_lan_is_refused(http, tmp_path, monkeypatch):
+    # A post's image link that redirects to an internal address: never fetched, never uploaded.
+    async def bounce(request):
+        raise web.HTTPFound("http://192.168.1.1/secret.jpg")
+
+    http.routes["/a.jpg"] = bounce
+    monkeypatch.setattr(upload, "ALLOW_PRIVATE_HOSTS", False)
+
+    async def first_hop_only(url):  # the test server itself is on 127.0.0.1: let only it through
+        return url.startswith(http.base) or await upload_public(url)
+
+    upload_public = upload._public_url
+    monkeypatch.setattr(upload, "_public_url", first_hop_only)
+    ctx = upload._Ctx(http.session, tmp_path, max_bytes=MB, stem="r_1")
+    assert await upload._download(ctx, upload._item([http.url("/a.jpg")]), 1) is None
+    assert list(tmp_path.iterdir()) == []
+
+
+async def test_web_page_with_an_image_name_is_not_media(http, tmp_path):
+    async def page(request):
+        return web.Response(text="<html>router admin</html>", content_type="text/html")
+
+    http.routes["/cat.jpg"] = page
+    ctx = upload._Ctx(http.session, tmp_path, max_bytes=MB, stem="p_1")
+    assert await upload._download(ctx, upload._item([http.url("/cat.jpg")]), 1) is None
+
+
+def test_ytdlp_never_uses_the_generic_extractor(tmp_path):
+    opts = upload._ytdlp_options(tmp_path, "s", MB, threading.Event())
+    assert opts["allowed_extractors"] == ["default", "-generic"]

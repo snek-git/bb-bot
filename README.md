@@ -8,7 +8,7 @@ What she does:
 - Downloads and uploads the media herself when every fixer fails
 - Hides the original's preview (or deletes the original, or leaves it alone; per server)
 - Deletes or updates her reposts when the original is deleted or edited
-- Buttons on reposts: Find source, Translate (tweets), and Open on X (or Pixiv, Reddit, ...) to the original post
+- Reposts show just the preview, a small "Tweet" (or "Pixiv", ...) link to the original, and Find source / Translate buttons
 - "Find source" in the right-click Apps menu for uploaded images
 - Roasts reposts (links already posted recently) with a jump link to the first post
 - Checks every fixer every 10 minutes and tells admins when one breaks or comes back

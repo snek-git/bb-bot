@@ -19,6 +19,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from bb import strings
+from bb.cooldown import Cooldown
 
 log = logging.getLogger(__name__)
 
@@ -31,6 +32,7 @@ BUTTON_URL_LIMIT = 512  # Discord rejects link buttons with longer URLs
 
 # (label, URL template); {} is the percent-encoded image URL.
 ENGINES: tuple[tuple[str, str], ...] = (
+    ("SauceNAO", "https://saucenao.com/search.php?url={}"),
     ("ascii2d", "https://ascii2d.net/search/url/{}"),
     ("IQDB", "https://iqdb.org/?url={}"),
     ("Yandex", "https://yandex.com/images/search?rpt=imageview&url={}"),
@@ -133,15 +135,11 @@ def format_similarity(similarity: float) -> str:
 
 
 def format_results(results: list[SauceResult]) -> str:
-    """BB's line about the best match, then one line per result. Links in <> so they don't preview."""
+    """Matches are plain: one line each, best first, links in <> so they don't preview.
+    BB only talks when there's nothing to show."""
     if not results:
         return strings.line("findsource.none")
-    top = results[0]
-    lines = [
-        strings.line("findsource.found", similarity=format_similarity(top.similarity), source=top.source)
-    ]
-    lines += [f"- [{r.source}](<{r.url}>) {format_similarity(r.similarity)}%" for r in results]
-    return "\n".join(lines)
+    return "\n".join(f"- [{r.source}](<{r.url}>) {format_similarity(r.similarity)}%" for r in results)
 
 
 def links_view(image_url: str) -> discord.ui.View:
@@ -188,6 +186,7 @@ class FindSource(commands.Cog):
     def __init__(self, bot: Any) -> None:
         self.bot = bot
         self._cache: OrderedDict[str, list[SauceResult]] = OrderedDict()
+        self.cooldown = Cooldown()  # every search posts publicly: one per person per 30s
         self.menu = app_commands.ContextMenu(name="Find source", callback=self.find_source_menu)
 
     async def cog_load(self) -> None:
@@ -199,16 +198,17 @@ class FindSource(commands.Cog):
     async def find_source_menu(self, interaction: discord.Interaction, message: discord.Message) -> None:
         await self.run(interaction, message)
 
-    async def lookup(self, image_url: str) -> list[SauceResult]:
+    async def lookup(self, image_url: str) -> list[SauceResult] | None:
+        """SauceNAO matches ([] = searched, nothing found), or None when BB couldn't search at all."""
         key = self.bot.config.saucenao_key
         if not key:
-            return []
+            return None
         if image_url in self._cache:
             self._cache.move_to_end(image_url)
             return self._cache[image_url]
         results = await search_saucenao(self.bot.http_client, key, image_url)
         if results is None:
-            return []
+            return None
         self._cache[image_url] = results
         while len(self._cache) > CACHE_SIZE:
             self._cache.popitem(last=False)
@@ -220,17 +220,37 @@ class FindSource(commands.Cog):
         if image_url is None:
             await interaction.response.send_message(strings.line("findsource.no_image"), ephemeral=True)
             return
+        if interaction.guild_id is not None and (await self.bot.settings.get(interaction.guild_id)).paused:
+            await interaction.response.send_message(strings.line("findsource.paused"), ephemeral=True)
+            return
+        if not self.cooldown.ready(interaction.user.id):
+            await interaction.response.send_message(strings.line("findsource.cooldown"), ephemeral=True)
+            return
+        if not self.bot.config.saucenao_key:
+            # No key, no search: say so honestly and hand over the engines instead of claiming "nothing".
+            text, view = await self.answer(image_url)
+            await interaction.response.send_message(
+                text, view=view, allowed_mentions=discord.AllowedMentions.none()
+            )
+            return
         await interaction.response.defer(thinking=True)
+        text, view = await self.answer(image_url)
+        await interaction.followup.send(
+            text,
+            view=view,
+            allowed_mentions=discord.AllowedMentions.none(),
+        )
+
+    async def answer(self, image_url: str) -> tuple[str, discord.ui.View]:
+        """What to post for an image: plain matches, or BB's line when there are none (or no search ran),
+        always with the search-engine buttons. Shared by the button, the right-click menu and @BB pings."""
         try:
             results = await self.lookup(image_url)
         except Exception:
             log.exception("find source lookup failed")
-            results = []
-        await interaction.followup.send(
-            format_results(results),
-            view=links_view(image_url),
-            allowed_mentions=discord.AllowedMentions.none(),
-        )
+            results = None
+        text = strings.line("findsource.manual") if results is None else format_results(results)
+        return text, links_view(image_url)
 
 
 async def setup(bot: Any) -> None:

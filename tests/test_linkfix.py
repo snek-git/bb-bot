@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import discord
 import pytest
 
-from bb import render, strings, upload, views
+from bb import strings, upload, views
 from bb.cogs import linkfix as lf
 from bb.cogs.sync import Sync, content_changed
 from bb.db import RepostRow
@@ -122,21 +122,6 @@ def test_settle_quip():
     assert lf.settle_quip(None, is_rerun=False, outcome="uploaded") in strings.variants("quip.uploaded")
 
 
-@pytest.mark.parametrize(
-    ("embeds", "expected"),
-    [
-        ([], False),
-        ([{"type": "rich", "image": {"url": "https://i/x.png"}}], True),
-        ([{"type": "rich", "thumbnail": {"url": "https://i/x.png"}}], True),
-        ([{"type": "video", "thumbnail": {"url": "https://i/x.png"}, "video": {"url": "v"}}], False),
-        ([{"type": "rich", "thumbnail": {"url": "t"}, "video": {"url": "v"}}], False),
-        ([{"type": "rich", "description": "text only"}], False),
-    ],
-)
-def test_embeds_have_image(embeds, expected):
-    assert lf.embeds_have_image(embeds) is expected
-
-
 def test_diff_keys():
     removed, added = lf.diff_keys({"twitter:1", "twitter:2"}, [tweet(2), tweet(3)])
     assert removed == {"twitter:1"}
@@ -182,10 +167,18 @@ def test_recent_ids_bounded_and_consumable():
 
 def test_content_changed():
     cached = SimpleNamespace(content="same")
-    assert not content_changed({"embeds": []}, None)
-    assert not content_changed({"content": "same"}, cached)
-    assert content_changed({"content": "new"}, cached)
-    assert content_changed({"content": "same"}, None)
+    ts = datetime(2026, 10, 18, 12, 0, tzinfo=UTC).timestamp()
+    just_now = datetime.fromtimestamp(ts - 30, UTC).isoformat()
+    last_year = datetime(2025, 10, 18, tzinfo=UTC).isoformat()
+    assert not content_changed({"embeds": []}, None, ts)
+    assert not content_changed({"content": "same"}, cached, ts)
+    assert content_changed({"content": "new"}, cached, ts)
+    # nothing cached (after a restart): only an edit Discord stamped just now counts
+    assert content_changed({"content": "same", "edited_timestamp": just_now}, None, ts)
+    assert not content_changed({"content": "same", "edited_timestamp": last_year}, None, ts)
+    assert not content_changed({"content": "same", "edited_timestamp": None}, None, ts)  # e.g. a pin
+    assert not content_changed({"content": "same"}, None, ts)
+    assert not content_changed({"content": "same", "edited_timestamp": "garbage"}, None, ts)
 
 
 # --- fakes for the other tracks --------------------------------------------------------------
@@ -268,36 +261,54 @@ class Harness:
         self.bot.cogs["LinkFix"] = self.cog
         self.ids = itertools.count(9000)
         self.sent: list[tuple[str, object]] = []
+        self.sends: list[dict] = []  # the same sends, with their files and quiet flag
         self.edits: list[dict] = []
         self.deleted: list[int] = []
+        self.delete_ok = True  # what Discord says when BB deletes a repost
         self.original: list[tuple[int, str]] = []
         self.embed_script: list[list[dict]] = []  # what each repost's embed wait returns, in order
         self.original_previews: dict[int, list[dict]] = {}  # preview on a user's own message, by id
+        self.waits: list[tuple[int, float | None]] = []  # (message id, seconds) for every embed wait
         self.cog._send_message = self._send
         self.cog._edit = self._edit
         self.cog._wait_for_embeds = self._wait
         self.cog._apply_original = self._apply
         self.cog.delete_repost_message = self._delete
         self.cog._locate = self._locate
+        self.predict_image = True
+        self.cog._predict_image = self._predict
+        self.tweet_info = None  # what FxTwitter's API says about a tweet (None = no answer)
+        self.cog._tweet_info = self._tweet
 
-    async def _send(self, message, settings, content, view):
+    async def _send(self, message, settings, content, view, *, make_files=None, quiet=False):
         self.sent.append((content, view))
-        return lf.Sent(message=SimpleNamespace(id=next(self.ids), embeds=[]))
+        sent_id = next(self.ids)
+        files = make_files() if make_files is not None else None
+        self.sends.append({"id": sent_id, "content": content, "view": view, "files": files, "quiet": quiet})
+        return lf.Sent(message=SimpleNamespace(id=sent_id, embeds=[]))
 
     async def _edit(self, repost, **changes):
         self.edits.append({"repost_id": repost.row.repost_id, **changes})
         return SimpleNamespace(id=repost.row.repost_id, embeds=[])
 
-    async def _wait(self, message_id):
+    async def _wait(self, message_id, seconds=None):
+        self.waits.append((message_id, seconds))
         if message_id < 9000:  # a user's message (repost ids come from self.ids, starting at 9000)
             return self.original_previews.get(message_id, [])
         return self.embed_script.pop(0) if self.embed_script else []
+
+    async def _predict(self, m):
+        return self.predict_image
+
+    async def _tweet(self, m):
+        return self.tweet_info
 
     async def _apply(self, message, action):
         self.original.append((message.id, action))
 
     async def _delete(self, row):
         self.deleted.append(row.repost_id)
+        return self.delete_ok
 
     async def _locate(self, post):
         return f"https://discord.com/channels/{post.guild_id}/{post.channel_id}/{post.message_id}"
@@ -314,13 +325,14 @@ def message(
     name: str = "bob",
     webhook_id=None,
     bot: bool = False,
+    created_at: datetime | None = None,
 ):
     return SimpleNamespace(
         id=mid, content=content, webhook_id=webhook_id, type=discord.MessageType.default,
         guild=SimpleNamespace(id=G, filesize_limit=25 * 1024 * 1024),
         channel=SimpleNamespace(id=CH),
         author=SimpleNamespace(id=author_id, display_name=name, bot=bot or webhook_id is not None),
-        created_at=datetime.fromtimestamp(NOON, UTC),
+        created_at=created_at or datetime.now(UTC),  # fresh by default: old history is never touched
     )
 
 
@@ -348,13 +360,12 @@ async def test_happy_path_with_image(h, db):
     await h.cog.process(message("look https://x.com/a/status/1"))
     assert await db.post_keys_for_message(500) == {"twitter:1"}
     content, view = h.sent[0]
-    assert content == f"[{render.BLANK}](https://fxtwitter.com/twitter:1)"
-    assert view == {"site_id": "twitter", "origin_author_id": 200, "original_url": "https://x.com/a/status/1"}
+    assert content.startswith("-# [") and "](<https://x.com/a/status/1>)" in content
+    assert content.endswith(" · [FxTwitter](https://fxtwitter.com/twitter:1)")
+    assert view == {"site_id": "twitter", "origin_author_id": 200, "has_image": True, "translatable": True}
     (row,) = await db.get_reposts_for_origin(500)
     assert (row.status, row.fixer_id, row.original_url) == ("ok", "fxtwitter", "https://x.com/a/status/1")
-    assert h.edits == [{"repost_id": row.repost_id, "view": {
-        "site_id": "twitter", "origin_author_id": 200, "translated": False, "has_image": True,
-        "original_url": "https://x.com/a/status/1"}}]
+    assert h.edits == []  # Find source was decided before sending: no "(edited)" on the repost
     assert h.original == [(500, "suppress")]
 
 
@@ -363,8 +374,91 @@ async def test_next_fixer_when_no_preview(h, db):
     await h.cog.process(message("https://x.com/a/status/1"))
     (row,) = await db.get_reposts_for_origin(500)
     assert (row.status, row.fixer_id) == ("ok", "vxtwitter")
-    assert len(h.edits) == 1 and "vxtwitter.com/twitter:1" in h.edits[0]["content"]  # no Find source edit
+    # The next fixer goes out as a fresh message and the first one is deleted: no edit, no "(edited)".
+    first, second = h.sends
+    assert h.edits == [] and h.deleted == [first["id"]] and row.repost_id == second["id"]
+    assert "vxtwitter.com/twitter:1" in second["content"] and second["view"] == first["view"]
+    assert second["quiet"] and not first["quiet"]  # the replacement pings nobody
     assert h.original == [(500, "suppress")]
+
+
+async def test_replacement_that_cannot_be_sent_edits_instead(h, db):
+    h.embed_script = [[], [text_embed().to_dict()]]
+    real_send = h.cog._send_message
+
+    async def flaky(message, settings, content, view, **kw):
+        if h.sends:  # the replacement
+            raise discord.HTTPException(SimpleNamespace(status=500, reason="boom"), "boom")
+        return await real_send(message, settings, content, view, **kw)
+
+    h.cog._send_message = flaky
+    await h.cog.process(message("https://x.com/a/status/1"))
+    (row,) = await db.get_reposts_for_origin(500)
+    assert (row.status, row.fixer_id, row.repost_id) == ("ok", "vxtwitter", h.sends[0]["id"])
+    # a label beats a stuck repost
+    assert len(h.edits) == 1 and "vxtwitter.com/twitter:1" in h.edits[0]["content"]
+    assert h.deleted == []
+
+
+async def test_replacement_never_brings_back_a_deleted_repost(h, db):
+    async def wait(message_id, seconds=None):
+        await db.delete_repost(message_id)  # a mod deletes the repost while BB waits for its preview
+        return []
+
+    h.cog._wait_for_embeds = wait
+    await h.cog.process(message("https://x.com/a/status/1"))
+    assert len(h.sends) == 1 and h.edits == []  # no fresh copy went out
+    assert await db.get_reposts_for_origin(500) == [] and h.original == []
+
+
+async def test_original_deleted_during_replacement_takes_the_new_one_too(h, db):
+    real_send = h.cog._send_message
+
+    async def send(message, settings, content, view, **kw):
+        sent = await real_send(message, settings, content, view, **kw)
+        if len(h.sends) == 2:
+            h.cog.mark_origin_deleted(500)  # the original is deleted while the replacement is on its way
+        return sent
+
+    h.cog._send_message = send
+    await h.cog.process(message("https://x.com/a/status/1"))
+    replacement = h.sends[1]["id"]
+    assert replacement in h.deleted and await db.get_repost(replacement) is None
+
+
+async def test_old_repost_that_will_not_delete_stays_tracked(h, db):
+    h.embed_script = [[], [text_embed().to_dict()]]
+    h.delete_ok = False
+    await h.cog.process(message("https://x.com/a/status/1"))
+    ids = sorted(r.repost_id for r in await db.get_reposts_for_origin(500))
+    assert ids == [h.sends[0]["id"], h.sends[1]["id"]]  # still up, so still known: sync can reach it
+
+
+async def test_failed_replacement_upload_edits_with_fresh_files(h, db, monkeypatch, tmp_path):
+    media = tmp_path / "pic.jpg"
+    media.write_bytes(b"jpeg")
+
+    async def fetch(m, *, max_bytes, session, workdir):
+        return [upload.MediaFile(path=media, filename="pic.jpg", size=4)]
+
+    monkeypatch.setattr(upload, "fetch_media", fetch)
+    real_send = h.cog._send_message
+
+    async def flaky(message, settings, content, view, **kw):
+        if h.sends:
+            if kw.get("make_files"):
+                for file in kw["make_files"]():  # what discord.py does to a failed send's files
+                    file.close()
+            raise discord.HTTPException(SimpleNamespace(status=500, reason="boom"), "boom")
+        return await real_send(message, settings, content, view, **kw)
+
+    h.cog._send_message = flaky
+    await h.cog.process(message("https://x.com/a/status/1"))
+    (row,) = await db.get_reposts_for_origin(500)
+    assert row.status == "uploaded"
+    (file,) = h.edits[-1]["attachments"]
+    assert file.filename == "pic.jpg" and not file.fp.closed  # built for this edit, not reused
+    file.close()
 
 
 async def test_down_fixers_go_last(h, db):
@@ -390,10 +484,12 @@ async def test_upload_fallback(h, db, monkeypatch, tmp_path):
     (row,) = await db.get_reposts_for_origin(500)
     assert (row.status, row.fixer_id) == ("uploaded", None)
     assert row.quip in strings.variants("quip.uploaded")
-    last = h.edits[-1]
-    assert last["content"] == f"-# {row.quip}"
-    assert [f.filename for f in last["attachments"]] == ["SPOILER_pic.jpg"]
-    assert last["view"]["has_image"] is True
+    last = h.sends[-1]
+    # fxtwitter, then vxtwitter, then the upload: each one replaced the one before
+    assert h.edits == [] and row.repost_id == last["id"] and h.deleted == [s["id"] for s in h.sends[:-1]]
+    assert last["content"].startswith("-# [") and last["content"].endswith(f" · {row.quip}")
+    assert [f.filename for f in last["files"]] == ["SPOILER_pic.jpg"]
+    assert last["view"]["has_image"] is False  # a tweet: no Find source, even for an uploaded image
     assert seen["max_bytes"] == 25 * 1024 * 1024
     assert h.original == [(500, "suppress")]
 
@@ -402,7 +498,8 @@ async def test_everything_failed_leaves_the_original(h, db):
     await h.cog.process(message("https://x.com/a/status/1"))
     (row,) = await db.get_reposts_for_origin(500)
     assert row.status == "failed"
-    assert "fxtwitter" not in h.edits[-1]["content"] and "vxtwitter" not in h.edits[-1]["content"]
+    last = h.sends[-1]["content"]
+    assert h.edits == [] and "fxtwitter" not in last and "vxtwitter" not in last
     assert row.quip in strings.variants("quip.failed")
     assert h.original == []
 
@@ -442,7 +539,7 @@ async def test_rerun_is_roasted_and_logged(h, db):
     h.embed_script = [[text_embed().to_dict()], [text_embed().to_dict()]]
     await h.cog.process(message("https://x.com/a/status/1", mid=400, author_id=100, name="alice"))
     await h.cog.process(message("https://x.com/a/status/1", mid=500, author_id=200, name="bob"))
-    quip_line = h.sent[1][0].removeprefix("-# ").rsplit(f" [{render.BLANK}]", 1)[0]
+    quip_line = h.sent[1][0].split(" · ", 2)[2]  # "-# Tweet · FxTwitter · <roast>"
     assert "alice" in quip_line and "/channels/1/10/400" in quip_line
     (row,) = await db.get_reposts_for_origin(500)
     assert row.quip == quip_line
@@ -456,6 +553,136 @@ async def test_rerun_of_already_fixed_link_is_logged(h, db):
     await h.cog.process(message("https://fxtwitter.com/a/status/7", mid=500, author_id=200))
     assert await db.top_rerun_offenders(G, since=0) == [(200, "bob", 1)]
     assert len(h.sent) == 1
+
+
+LATE_VX = {"type": "rich", "url": "https://vxtwitter.com/a/status/7"}  # fixvx previews arrive as vxtwitter
+
+
+@pytest.fixture
+def late_vx(links):
+    links["https://vxtwitter.com/a/status/7"] = tweet(7, fixed=True)
+
+
+async def test_rescue_waits_longer_than_the_fixer_chain(h, db):
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://fxtwitter.com/a/status/7"))
+    assert h.waits[0] == (500, h.cog.rescue_timeout)  # the poster's own fixer link gets the long wait
+    assert h.waits[1][1] is None  # BB's repost: the normal fixer-chain timeout
+    assert h.cog.rescue_timeout > h.cog.embed_timeout
+
+
+async def test_late_preview_takes_the_rescue_down(h, db, late_vx):
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://fxtwitter.com/a/status/7"))
+    (row,) = await db.get_reposts_for_origin(500)
+    await h.cog.on_raw_message_edit(edit_payload(500, [LATE_VX], author_id=200))
+    assert h.deleted == [row.repost_id]
+    assert await db.get_reposts_for_origin(500) == []
+    assert await db.post_keys_for_message(500) == {"twitter:7"}  # repost roasts still know the link
+    assert 500 not in h.cog._rescue_watches
+
+
+async def test_late_preview_of_another_link_keeps_the_rescue(h, db, late_vx):
+    h.embed_script = [[text_embed().to_dict()], [text_embed().to_dict()]]
+    await h.cog.process(message("https://fxtwitter.com/a/status/7 https://x.com/a/status/1"))
+    # x.com's own late preview is for the other link: the rescue of status/7 is not a duplicate
+    await h.cog.on_raw_message_edit(edit_payload(
+        500, [{"type": "rich", "url": "https://x.com/a/status/1"}], author_id=200
+    ))
+    await h.cog.on_raw_message_edit(edit_payload(500, [{"type": "rich"}], author_id=200))  # no URL
+    assert h.deleted == []
+    assert sorted(r.canonical_key for r in await db.get_reposts_for_origin(500)) == ["twitter:1", "twitter:7"]
+
+
+async def test_late_preview_while_settling_waits_for_the_settle(h, db, late_vx):
+    deleted_mid_settle = []
+
+    async def wait(message_id, seconds=None):
+        if message_id < 9000:
+            return []  # the original: no preview yet, so BB rescues
+        await h.cog.on_raw_message_edit(edit_payload(500, [LATE_VX], author_id=200))
+        deleted_mid_settle.extend(h.deleted)
+        return [text_embed().to_dict()]
+
+    h.cog._wait_for_embeds = wait
+    await h.cog.process(message("https://fxtwitter.com/a/status/7"))
+    assert deleted_mid_settle == []  # never deleted while the repost was still being edited
+    assert len(h.deleted) == 1 and await db.get_reposts_for_origin(500) == []
+
+
+async def test_sites_own_late_preview_keeps_the_rescue(h, db, late_vx):
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://fxtwitter.com/a/status/7"))
+    # x.com's own card for the same tweet is no substitute for BB's fix
+    await h.cog.on_raw_message_edit(edit_payload(
+        500, [{"type": "rich", "url": "https://x.com/a/status/7"}], author_id=200
+    ))
+    assert h.deleted == [] and len(await db.get_reposts_for_origin(500)) == 1
+
+
+async def test_rescue_that_roasts_a_repost_stays_up(h, db, late_vx):
+    h.embed_script = [[text_embed().to_dict()], [text_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/7", mid=400, author_id=100, name="alice"))
+    await h.cog.process(message("https://fxtwitter.com/a/status/7", mid=500, author_id=200))
+    (row,) = await db.get_reposts_for_origin(500)
+    assert row.quip  # the roast
+    await h.cog.on_raw_message_edit(edit_payload(500, [LATE_VX], author_id=200))
+    assert h.deleted == [] and await db.get_repost(row.repost_id) is not None
+
+
+async def test_late_preview_only_takes_down_the_rescue_itself(h, db, late_vx):
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://fxtwitter.com/a/status/7"))
+    (rescue,) = await db.get_reposts_for_origin(500)
+    # edits removed the rescue and BB made a normal repost for the same link
+    await db.delete_repost(rescue.repost_id)
+    await _repost_row(db, 9555, key="twitter:7")
+    await h.cog.on_raw_message_edit(edit_payload(500, [LATE_VX], author_id=200))
+    assert h.deleted == [] and await db.get_repost(9555) is not None
+
+
+async def test_failed_delete_keeps_the_record(h, db, late_vx):
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://fxtwitter.com/a/status/7"))
+    (row,) = await db.get_reposts_for_origin(500)
+    h.delete_ok = False  # Discord refused: the message is still up, so BB keeps knowing about it
+    await h.cog.on_raw_message_edit(edit_payload(500, [LATE_VX], author_id=200))
+    assert h.deleted == [row.repost_id] and await db.get_repost(row.repost_id) is not None
+    h.delete_ok = True  # the next preview update retries
+    await h.cog.on_raw_message_edit(edit_payload(500, [LATE_VX], author_id=200))
+    assert h.deleted == [row.repost_id, row.repost_id] and await db.get_repost(row.repost_id) is None
+
+
+async def test_second_rescue_keeps_watching_the_first(h, db):
+    msg = message("https://fxtwitter.com/a/status/7")
+    first = h.cog._watch_rescue(msg, {"twitter:7"})
+    first.reposts["twitter:7"] = 9100
+    first.settled = True
+    second = h.cog._watch_rescue(msg, {"twitter:8"})
+    assert second is first and second.keys == {"twitter:7", "twitter:8"}
+    assert second.reposts == {"twitter:7": 9100} and not second.settled
+    second.deadline = 0  # expired: a later rescue starts fresh instead of reviving the old one
+    third = h.cog._watch_rescue(msg, {"twitter:9"})
+    assert third is not first and third.keys == {"twitter:9"} and third.reposts == {}
+
+
+async def test_rescue_replaced_by_the_next_fixer_can_still_be_undone(h, db, late_vx):
+    h.embed_script = [[], [text_embed().to_dict()]]  # BB's first fixer shows nothing: she switches
+    await h.cog.process(message("https://fxtwitter.com/a/status/7"))
+    first, second = h.sends
+    (row,) = await db.get_reposts_for_origin(500)
+    assert row.repost_id == second["id"]
+    await h.cog.on_raw_message_edit(edit_payload(500, [LATE_VX], author_id=200))
+    assert h.deleted == [first["id"], second["id"]] and await db.get_reposts_for_origin(500) == []
+
+
+async def test_late_preview_after_the_window_is_ignored(h, db, late_vx):
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://fxtwitter.com/a/status/7"))
+    h.cog._rescue_watches[500].deadline = 0
+    await h.cog.on_raw_message_edit(edit_payload(500, [LATE_VX], author_id=200))
+    assert h.deleted == [] and len(await db.get_reposts_for_origin(500)) == 1
+    assert 500 not in h.cog._rescue_watches
 
 
 async def test_skip_word(h, db):
@@ -686,7 +913,7 @@ async def test_armed_rare_line_fires_once(h, db):
     await h.cog.process(message("https://x.com/a/status/1", mid=400))
     await h.cog.process(message("https://x.com/a/status/2", mid=500))
     first, second = h.sent[0][0], h.sent[1][0]
-    assert first.startswith("-# <@42> hi♡ ")
+    assert first.endswith(" · <@42> hi♡")
     assert "<@42>" not in second
     assert (await h.bot.settings.get(G)).rare_armed is False
 
@@ -698,3 +925,152 @@ async def test_armed_rare_line_waits_out_a_repost_roast(h, db):
     await h.cog.process(message("https://x.com/a/status/1", mid=500, author_id=200, name="bob"))
     assert "alice" in h.sent[1][0] and "<@42>" not in h.sent[1][0]  # the roast wins
     assert (await h.bot.settings.get(G)).rare_armed is True  # still armed for the next link
+
+
+
+async def test_image_guess_without_the_network(db):
+    cog = lf.LinkFix(SimpleNamespace(settings=None, db=db))
+    pixiv = SimpleNamespace(site=SimpleNamespace(id="pixiv"), parts={"id": "1"})
+    tiktok = SimpleNamespace(site=SimpleNamespace(id="tiktok"), parts={"id": "1"})
+    reddit = SimpleNamespace(site=SimpleNamespace(id="reddit"), parts={"id": "1"})
+    tweet = SimpleNamespace(site=SimpleNamespace(id="twitter"), parts={"id": "1"})
+    assert await cog._predict_image(reddit) is True  # reposted art: worth a source search
+    assert await cog._predict_image(tweet) is False  # the tweet is usually the source itself
+    assert await cog._predict_image(pixiv) is False
+    assert await cog._predict_image(tiktok) is False
+
+
+async def test_text_only_tweet_gets_no_find_source(h, db):
+    h.predict_image = False
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1"))
+    assert h.sent[0][1]["has_image"] is False and h.edits == []
+
+
+async def test_edit_event_for_an_old_unhandled_message_is_ignored(h, db):
+    # Discord sends edit events for years-old messages (pins, refreshed previews): never fix those.
+    h.embed_script = [[text_embed().to_dict()]]
+    old = datetime.fromtimestamp(NOON, UTC)
+    await h.cog.process(message("https://x.com/a/status/1", created_at=old), edit=True)
+    assert h.sent == [] and await db.post_keys_for_message(500) == set()
+
+
+async def test_pin_on_old_handled_message_does_nothing(h, db, links):
+    # The audit's repro: after a restart nothing is cached, and someone pins a months-old message BB
+    # handled back then. Links that only match since an update must not be reposted.
+    pixiv_url = "https://www.pixiv.net/artworks/9"
+    links[pixiv_url] = LinkMatch(PIXIV, pixiv_url, "pixiv:9")
+    content = f"https://x.com/a/status/1 {pixiv_url}"
+    await db.insert_post(guild_id=G, channel_id=CH, message_id=500, author_id=200, author_name="bob",
+                         site="twitter", canonical_key="twitter:1", created_at=NOON)
+    h.embed_script = [[text_embed().to_dict()]]
+    msg = message(content, created_at=datetime.fromtimestamp(NOON, UTC))
+    payload = SimpleNamespace(guild_id=G, message_id=500, data={"content": content, "pinned": True},
+                              cached_message=None, message=msg)
+    await Sync(h.bot).on_raw_message_edit(payload)
+    assert h.sent == [] and h.deleted == []
+
+
+async def test_fresh_edit_on_old_message_can_add(h, db):
+    old = datetime.fromtimestamp(NOON, UTC)
+    await db.insert_post(guild_id=G, channel_id=CH, message_id=500, author_id=200, author_name="bob",
+                         site="twitter", canonical_key="twitter:1", created_at=NOON)
+    h.embed_script = [[text_embed().to_dict()]]
+    edited = message("https://x.com/a/status/1 https://x.com/a/status/3", created_at=old)
+    edited.edited_at = datetime.now(UTC)  # someone really just edited it
+    await h.cog.process(edited, edit=True)
+    assert len(h.sent) == 1 and "twitter:3" in h.sent[0][0]
+
+
+async def test_edit_on_old_message_removes_but_never_adds(h, db):
+    old = datetime.fromtimestamp(NOON, UTC)
+    for n in (1, 2):
+        await db.insert_post(guild_id=G, channel_id=CH, message_id=500, author_id=200, author_name="bob",
+                             site="twitter", canonical_key=f"twitter:{n}", created_at=NOON)
+    await _repost_row(db, 9001, key="twitter:1")
+    h.embed_script = [[text_embed().to_dict()]]
+    edited = message("https://x.com/a/status/2 https://x.com/a/status/3", created_at=old)
+    await h.cog.process(edited, edit=True)
+    assert h.sent == []  # status/3 is new, but the message is old: no repost
+    assert h.deleted == [9001]  # status/1 was edited out: its repost goes
+    assert await db.post_keys_for_message(500) == {"twitter:2"}
+
+
+def test_edit_counts_rules():
+    from bb.cogs.linkfix import FRESH_FOR as EDIT_WINDOW
+    from bb.cogs.sync import edit_counts
+
+    assert edit_counts(1000.0, 1000.0 + 60, handled_before=False)  # fresh message, link added
+    assert not edit_counts(1000.0, 1000.0 + EDIT_WINDOW + 1, handled_before=False)  # old, never handled
+    assert edit_counts(1000.0, 1000.0 + 10**8, handled_before=True)  # BB's own message history: keep syncing
+
+
+
+async def test_old_history_is_never_touched_even_as_a_new_message(h, db):
+    # e.g. Discord replaying events after a reconnect: no fix, no card, no record, no hiding the original
+    h.embed_script = [[text_embed().to_dict()]]
+    old = datetime.fromtimestamp(NOON, UTC)
+    await h.cog.process(message("https://x.com/a/status/1", created_at=old))
+    assert h.sent == [] and h.original == [] and await db.post_keys_for_message(500) == set()
+
+
+async def test_paused_bb_does_nothing(h, db):
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.quiet(paused=True)
+    await h.cog.process(message("https://x.com/a/status/1"))
+    assert h.sent == [] and await db.post_keys_for_message(500) == set()
+
+
+async def test_burst_brake_stops_a_flood(h, db):
+    from bb.brake import BurstBrake
+
+    h.cog.brake = BurstBrake(per_channel=2, per_server=40, clock=lambda: 0.0)
+    h.embed_script = [[text_embed().to_dict()]] * 4
+    for n in range(1, 5):
+        await h.cog.process(message(f"https://x.com/a/status/{n}", mid=400 + n))
+    assert len(h.sent) == 2  # the third and fourth were held back
+
+
+
+@pytest.mark.parametrize(
+    ("lang", "target", "expected"),
+    [
+        ("ja", "en", True), ("en", "en", False), ("en-gb", "en", False), ("ko", "ko", False),
+        ("en", "ja", True),
+        (None, "en", False), ("zxx", "en", False), ("qme", "en", False), ("und", "en", False),
+    ],
+)
+def test_offer_translation(lang, target, expected):
+    assert lf.offer_translation(lang, target) is expected
+
+
+async def test_english_tweet_gets_no_translate_button(h, db):
+    h.tweet_info = {"lang": "en", "media": {"all": [{"type": "photo"}]}}
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1"))
+    assert h.sent[0][1]["translatable"] is False
+
+
+
+def test_translate_offered_without_an_answer():
+    assert lf.translate_offered(None, "en") is True
+    assert lf.translate_offered({"lang": "en"}, "en") is False
+    assert lf.translate_offered({"lang": "ja"}, "en") is True
+
+
+
+@pytest.mark.parametrize(
+    ("lang", "text", "expected"),
+    [
+        ("de", "gem alert 💎", False),  # Twitter mislabels short English; too little text to trust it
+        ("de", "Das ist wirklich ein sehr schönes Bild, danke!", True),
+        ("ja", "かわいい", True),  # non-Latin script: a few characters are enough
+        ("ko", "최고", True),
+        ("en", "かわいい", False),  # labelled as the server's language: never
+        ("tl", "lol ok", False),
+        ("de", "", False),
+    ],
+)
+def test_translate_needs_enough_text(lang, text, expected):
+    assert lf.offer_translation(lang, "en", text) is expected
+    assert lf.translate_offered({"lang": lang, "text": text}, "en") is expected

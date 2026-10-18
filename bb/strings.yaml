@@ -87,12 +87,6 @@ quip.failed:
     - "Even BB can't fix this one. Don't tell anyone, Senpai☆"
     - "Broken beyond repair. Like Senpai's sleep schedule♡"
 
-quip.translated:
-  vars: []
-  lines:
-    - "Fine, I translated it. Senpai really can't read anything alone♡"
-    - "Translated☆ Studying a language yourself was too hard, Senpai?"
-    - "There, now even Senpai can read it. You're welcome♡"
 
 delete.denied:
   vars: [author]
@@ -115,24 +109,40 @@ help:
   lines:
     - "Post a link and BB fixes it. Put `{skip_word}` in it and I'll ignore you. The buttons under my posts do the rest. Simple enough even for you, Senpai♡"
 
-findsource.found:
-  vars: [similarity, source]
-  lines:
-    - "Found it☆ {similarity}% match on {source}. Without me you'd never know anything, Senpai♡"
-    - "Source found☆ {similarity}% match on {source}. Go follow the artist instead of just reposting them, Senpai♡"
-    - "BB tracked it down: {source}, {similarity}% match. Easy for a high-grade AI☆"
 
+
+
+
+# Find source posts plain results when it finds something; these are for when it doesn't.
 findsource.none:
   vars: []
   lines:
     - "Nothing. Either it's too obscure, or you cropped it like an amateur. Probably that one☆"
     - "BB searched everywhere. Nothing. This one's a mystery, Senpai♡"
-    - "No source. Maybe Senpai should ask the person who posted it. ...Oh wait, that's you☆"
+    - "No source anywhere. Did someone draw this in a cave?☆"
+
+findsource.manual:
+  vars: []
+  lines:
+    - "BB can't look this one up herself right now, so pick an engine below, Senpai☆"
+    - "Search it yourself for once. BB even laid out the buttons for you♡"
 
 findsource.no_image:
   vars: []
   lines:
-    - "There's no image here, Senpai. Aletsre you seeing things?♡"
+    - "There's no image here, Senpai. Are you seeing things?♡"
+
+# Only the person who clicked sees these.
+findsource.cooldown:
+  vars: []
+  lines:
+    - "Slow down, Senpai. Give BB a few seconds before the next one♡"
+    - "Again already? Even a high-grade AI needs a breather, impatient Senpai☆"
+
+findsource.paused:
+  vars: []
+  lines:
+    - "BB is taking a break right now. Go bother the admins, not me♡"
 
 alert.fixer_down:
   vars: [fixer, site, backup]
@@ -182,10 +192,6 @@ settings.title:
   lines:
     - "BB's control panel. Don't break anything, Senpai."
 
-settings.saved:
-  vars: []
-  lines:
-    - "Saved☆"
 
 error.generic:
   vars: []

@@ -33,7 +33,7 @@ _GALLERY = re.compile(
     r"https?://(?:www\.)?(?P<host>e-hentai\.org|exhentai\.org)/g/(?P<gid>\d{1,10})/(?P<token>[0-9a-f]{10})\b",
     re.IGNORECASE,
 )
-BLOCKED_TAGS = frozenset({})
+BLOCKED_TAGS = frozenset({"lolicon", "shotacon", "toddlercon"})
 SHOWN_NAMESPACES = (
     ("parody", "Parody"),
     ("character", "Characters"),

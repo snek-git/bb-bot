@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 import discord
@@ -15,14 +17,35 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 
-def content_changed(data: dict[str, Any], cached: discord.Message | None) -> bool:
-    """Edit events also fire when previews load or flags change; only real content edits count.
+def edit_counts(created_at: float, now_ts: float, *, handled_before: bool) -> bool:
+    """Discord sends edit events for old messages too (pins, refreshed previews). Only follow an edit if
+    BB already handled that message, or it was posted moments ago (someone adding a link right after
+    posting). content_changed filters out the events that aren't real edits, and process only adds
+    reposts to an old message when the edit itself is fresh."""
+    from bb.cogs.linkfix import FRESH_FOR
 
-    Without a cached copy we can't tell, so assume it changed; the key diff in linkfix is a no-op then.
-    """
+    return handled_before or (now_ts - created_at) <= FRESH_FOR
+
+
+def content_changed(data: dict[str, Any], cached: discord.Message | None, now_ts: float) -> bool:
+    """Edit events also fire for pins, loading previews and flag changes, with the full content and no
+    diff; only real content edits count. With a cached copy, compare. Without one (always the case
+    after a restart), only an edit Discord stamped in the last few minutes counts: a pin on an old
+    message keeps its old edited_timestamp, or none at all."""
+    from bb.cogs.linkfix import FRESH_FOR
+
     if "content" not in data:
         return False
-    return cached is None or cached.content != data["content"]
+    if cached is not None:
+        return cached.content != data["content"]
+    stamp = data.get("edited_timestamp")
+    if not stamp:
+        return False
+    try:
+        edited_at = datetime.fromisoformat(stamp).timestamp()
+    except ValueError:
+        return False
+    return now_ts - edited_at <= FRESH_FOR
 
 
 class Sync(commands.Cog):
@@ -71,7 +94,7 @@ class Sync(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
-        if payload.guild_id is None or not content_changed(payload.data, payload.cached_message):
+        if payload.guild_id is None or not content_changed(payload.data, payload.cached_message, time.time()):
             return
         linkfix = self.linkfix
         if linkfix is None:
@@ -82,6 +105,9 @@ class Sync(commands.Cog):
                 return
             if await self.bot.db.get_repost(message.id) is not None:
                 return  # BB's own repost being edited (fixer switch, translate)
+            handled = bool(await self.bot.db.post_keys_for_message(message.id))
+            if not edit_counts(message.created_at.timestamp(), time.time(), handled_before=handled):
+                return
             await linkfix.process(message, edit=True)
         except Exception:
             log.exception("edit sync failed for message %s", payload.message_id)

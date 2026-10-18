@@ -473,6 +473,8 @@ def test_known_fixer_domain_is_not_a_mirror() -> None:
         "https://example.com/status/12345678901234",
         "https://example.com/someone/status/12345678901234/edit",
         "https://example.com/a-very-long-username-here/status/12345678901234",
+        "https://shop.example/orders/status/123456789012345",  # too short for a modern tweet
+        "https://ci.example/build/status/9999999999999999999",  # a "tweet" from the future
         "https://example.com/artworks/1580459",
         "https://example.com/en/artworks/1580459",
         "https://example.com/p/BsOGulcndj-/",
@@ -487,3 +489,10 @@ def test_known_fixer_domain_is_not_a_mirror() -> None:
 )
 def test_unknown_domain_generic_paths_do_not_match(url: str) -> None:
     assert sites.match(url) is None
+
+
+def test_plausible_tweet_id():
+    now_ts = 1_792_000_000.0  # Oct 2026
+    assert sites.plausible_tweet_id("266031293945503744", now_ts)  # 2012
+    assert not sites.plausible_tweet_id("9999999999999999999", now_ts)  # decodes to the 2080s
+    assert not sites.plausible_tweet_id("not-a-number", now_ts)

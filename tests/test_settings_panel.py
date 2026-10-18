@@ -8,7 +8,6 @@ from types import SimpleNamespace
 import discord
 import pytest
 
-from bb import strings
 from bb.cogs import settings as panel_mod
 from bb.links import sites
 from bb.links.model import Fixer, Site
@@ -195,7 +194,7 @@ async def test_site_toggle_saves_and_redraws(panel, db):
     assert (await db.get_guild_settings(1))["sites_enabled"]["tiktok"] is False
     assert find(panel, panel_mod.SiteButton, site_id="tiktok").style is discord.ButtonStyle.secondary
     content = interaction.response.calls[0][1]["content"]
-    assert content.endswith(f"-# {strings.variants('settings.saved')[0]}")
+    assert content.endswith("-# Saved.")
     assert "Off: TikTok" in content
 
 
@@ -226,9 +225,9 @@ async def test_quip_select_keeps_custom_rates(panel, db):
     panel.rebuild()
     select = find(panel, panel_mod.ChoiceSelect, field="quip_rate")
     assert [o.value for o in select.options if o.default] == ["4"]
-    select._values = ["0"]
+    select._values = ["10"]
     await click(panel, select)
-    assert (await db.get_guild_settings(1))["quip_rate"] == 0
+    assert (await db.get_guild_settings(1))["quip_rate"] == 10
 
 
 async def test_channel_pickers(panel):
@@ -346,3 +345,12 @@ async def test_use_on_next_link_arms_the_rare_line(panel):
     assert panel.settings.rare_armed is True
     assert "Armed" in panel_mod.describe("rare", panel.settings)
     assert find(panel, panel_mod.SetButton, field="rare_armed").disabled  # can't double-arm
+
+
+
+async def test_pause_switch(panel):
+    panel.section = "status"
+    panel.rebuild()
+    await click(panel, find(panel, panel_mod.ToggleButton, field="paused"))
+    assert panel.settings.paused is True
+    assert "BB is paused" in panel_mod.describe("status", panel.settings)

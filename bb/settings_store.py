@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass, field, fields, replace
 from typing import Any, Literal
 
@@ -17,6 +18,8 @@ def _all_sites_on() -> dict[str, bool]:
 
 @dataclass(frozen=True)
 class GuildSettings:
+    # Emergency stop: BB posts nothing at all (fixes, cards, ping replies, roundup, alerts) while set.
+    paused: bool = False
     # Sites
     sites_enabled: dict[str, bool] = field(default_factory=_all_sites_on)
     # Channels: "deny" = works everywhere except `channels`; "allow" = only in `channels`.
@@ -28,7 +31,8 @@ class GuildSettings:
     # Original message after a successful fix
     original_action: Literal["suppress", "delete", "nothing"] = "suppress"
     # Quips: 0 = off, 1 = every fix, N = on 1 in N fixes
-    quip_rate: int = 100
+    # Random quips on successful fixes: off by default (roasts, failures and the rare line still talk).
+    quip_rate: int = 0
     # Channels whose quips come from a themed pool instead of the normal one.
     lewd_channels: tuple[int, ...] = ()  # e.g. #2d-cum-zone: flirty teasing
     chaos_channels: tuple[int, ...] = ()  # e.g. #brazil (/b/): disgusted-but-amused
@@ -97,20 +101,25 @@ class SettingsStore:
     def __init__(self, db: Database) -> None:
         self._db = db
         self._cache: dict[int, GuildSettings] = {}
+        # One update at a time: two writers reading the same "current" would make one of them lost
+        # (e.g. the roundup saving roundup_last_sent while an admin clicks in /settings).
+        self._write_lock = asyncio.Lock()
 
     async def get(self, guild_id: int) -> GuildSettings:
         cached = self._cache.get(guild_id)
         if cached is None:
-            cached = GuildSettings.from_overrides(await self._db.get_guild_settings(guild_id))
-            self._cache[guild_id] = cached
+            loaded = GuildSettings.from_overrides(await self._db.get_guild_settings(guild_id))
+            # an update may have landed while this read was waiting: keep the newer value
+            cached = self._cache.setdefault(guild_id, loaded)
         return cached
 
     async def update(self, guild_id: int, **changes: Any) -> GuildSettings:
-        current = await self.get(guild_id)
         for key in CHANNEL_LIST_FIELDS:
             if key in changes:
                 changes[key] = tuple(int(c) for c in changes[key])
-        updated = replace(current, **changes)
-        await self._db.set_guild_settings(guild_id, updated.to_overrides())
-        self._cache[guild_id] = updated
+        async with self._write_lock:
+            current = await self.get(guild_id)
+            updated = replace(current, **changes)
+            await self._db.set_guild_settings(guild_id, updated.to_overrides())
+            self._cache[guild_id] = updated
         return updated

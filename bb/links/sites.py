@@ -44,6 +44,7 @@ Fixer notes (verified live 2026-10, Discordbot UA, HTTP 200 + og:/twitter: tags)
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable, Collection
 from urllib.parse import parse_qs, urlsplit
 
@@ -236,7 +237,7 @@ _MIRRORS: tuple[tuple[str, re.Pattern[str]], ...] = (
     (
         "twitter",
         re.compile(
-            r"/(?!web/)(?:[a-z0-9_]{1,15}|i/web)/status(?:es)?/\d{10,20}"
+            r"/(?!web/)(?:[a-z0-9_]{1,15}|i/web)/status(?:es)?/\d{17,19}"
             r"(?:/(?:photo|video)/\d{1,2})?(?:/[a-z]{2}(?:[-_][a-z]{2,4})?)?/?",
             re.I,
         ),
@@ -256,6 +257,19 @@ _MIRRORS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"/r/\w{2,21}/comments/[a-z0-9]{3,10}(?:/[^/]*(?:/[a-z0-9]{2,10})?)?/?", re.I),
     ),
 )
+
+
+TWITTER_EPOCH_MS = 1288834974657
+
+
+def plausible_tweet_id(tweet_id: str, now_ts: float | None = None) -> bool:
+    """For hosts we've never heard of: a real tweet id is a snowflake whose timestamp is in the past.
+    Order, build and ticket numbers that happen to sit under /status/ usually aren't."""
+    try:
+        ms = (int(tweet_id) >> 22) + TWITTER_EPOCH_MS
+    except ValueError:
+        return False
+    return ms <= ((time.time() if now_ts is None else now_ts) + 86400) * 1000
 
 
 def _host_in(host: str, domains: Collection[str]) -> bool:
@@ -402,6 +416,8 @@ def match(url: str, spoiler: bool = False) -> LinkMatch | None:
     short_ok = (host == "redd.it" or fixed) and not mirror
     parts = _PARSERS[site_id](path, split.query, short_ok)
     if parts is None:
+        return None
+    if mirror and site_id == "twitter" and not plausible_tweet_id(parts.get("id", "")):
         return None
     if fixed:
         parts["already_fixed"] = "1"

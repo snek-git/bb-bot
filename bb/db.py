@@ -77,6 +77,12 @@ CREATE TABLE IF NOT EXISTS fixer_health (
 """
 
 
+# Bump SCHEMA_VERSION with every schema change: put the change in SCHEMA (new databases) and the
+# step that takes an existing database there in MIGRATIONS[new version].
+SCHEMA_VERSION = 1
+MIGRATIONS: dict[int, str] = {}
+
+
 @dataclass
 class PostRow:
     id: int
@@ -147,8 +153,47 @@ class Database:
             Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = await aiosqlite.connect(self.path)
         self._conn.row_factory = aiosqlite.Row
-        await self._conn.executescript(SCHEMA)
-        await self._conn.commit()
+        try:
+            await self._migrate()
+            await self._conn.executescript(SCHEMA)  # new tables and indexes; existing ones are kept
+            await self._check_columns()
+            await self._conn.commit()
+        except BaseException:
+            await self.close()  # its worker thread would otherwise keep the process from exiting
+            raise
+
+    async def _migrate(self) -> None:
+        """A new database is created at the latest shape by SCHEMA, so it starts at SCHEMA_VERSION. An
+        existing one runs each missing step first (each in its own transaction), then SCHEMA."""
+        async with self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'reposts'"
+        ) as cursor:
+            existing = await cursor.fetchone() is not None
+        if not existing:
+            await self.conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            return
+        async with self.conn.execute("PRAGMA user_version") as cursor:
+            row = await cursor.fetchone()
+        stored = int(row[0]) if row else 0
+        version = max(stored, 1)  # 0: made before versioning existed, which is version 1
+        if version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"the database is schema version {version}, newer than this BB ({SCHEMA_VERSION})"
+            )
+        if stored == 0:
+            await self.conn.execute("PRAGMA user_version = 1")
+        for target in range(version + 1, SCHEMA_VERSION + 1):
+            step = MIGRATIONS.get(target, "")
+            await self.conn.executescript(f"BEGIN; {step}\n; PRAGMA user_version = {target}; COMMIT;")
+
+    async def _check_columns(self) -> None:
+        """Fail at startup, not later: a repost whose row can't be saved after it went out is a repost
+        BB loses track of (no edit or delete sync, no buttons)."""
+        async with self.conn.execute("PRAGMA table_info(reposts)") as cursor:
+            have = {row[1] for row in await cursor.fetchall()}
+        missing = [name for name in _REPOST_COLUMNS if name not in have]
+        if missing:
+            raise RuntimeError(f"the reposts table is missing columns {missing}; add a migration")
 
     async def close(self) -> None:
         if self._conn is not None:

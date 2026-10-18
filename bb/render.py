@@ -2,23 +2,22 @@
 
 Two styles, chosen once at startup with LINK_STYLE in .env:
 
-- "hidden" (default): no visible link text at all, just the preview (and a quip line when there is one).
-  The fixer link is a masked link whose text is a Braille blank (U+2800): it renders as nothing but
-  isn't whitespace, so Discord keeps the link and previews it.
+- "hidden" (default): one small line, "Tweet · FxTwitter", then the quip if there is one. "Tweet" links to
+  the real post (no preview); the fixer's name is the link Discord previews, and the one people can copy
+  to post elsewhere.
 - "subtle": one small grey line, "@user on Twitter", linking to the fixer.
 
-The original post is reachable through the "Open on X" link button either way (see views.py).
 """
 
 from __future__ import annotations
 
 from typing import Literal
 
+from bb.links import sites
 from bb.links.model import LinkMatch
 
 Style = Literal["hidden", "subtle"]
 STYLES: tuple[Style, ...] = ("hidden", "subtle")
-BLANK = "\u2800"  # Braille blank: invisible, but not whitespace
 BB_PURPLE = 0x9966CC  # cards, roundup, panels
 SEPARATOR = " · "
 
@@ -35,6 +34,16 @@ def current_style() -> Style:
     return _style
 
 
+# Characters that end or break a markdown link target. A posted URL can carry them in its query
+# ("?x=>https://elsewhere"), which would put a bare, previewed link into BB's message.
+_LINK_BREAKERS = {c: f"%{ord(c):02X}" for c in "<>()[]|`\\ \t\n"}
+
+
+def md_url(url: str) -> str:
+    """A URL safe to put inside [text](<url>): the breaking characters percent-encoded."""
+    return "".join(_LINK_BREAKERS.get(c, c) for c in url)
+
+
 def _spoiler(text: str, spoiler: bool) -> str:
     return f"||{text} ||" if spoiler else text
 
@@ -43,23 +52,28 @@ def _who(m: LinkMatch) -> str:
     return f"@{m.author} on {m.site.name}" if m.author else f"{m.site.name} post"
 
 
+def _head(m: LinkMatch, quip: str | None) -> str:
+    """The one visible line: a small link to the post on its real site ("Tweet"), then the quip."""
+    source = f"[{m.site.label}](<{md_url(sites.source_url(m))}>)"
+    return f"{source}{SEPARATOR}{quip}" if quip else source
+
+
 def format_repost(
     m: LinkMatch, fixer_name: str, fixed: str, quip: str | None = None, style: Style | None = None
 ) -> str:
-    """The repost text: a link to the fixer URL (the only previewed link) plus the quip, if any.
-
-    fixer_name is kept for callers; the preview card itself names the fixer.
-    """
+    """The repost text: a link to the fixer URL (the only previewed link) plus the quip, if any."""
+    fixed = md_url(fixed)
     if (style or _style) == "subtle":
         link = _spoiler(f"[{_who(m)}]({fixed})", m.spoiler)
         return f"-# {link}{SEPARATOR}{quip}" if quip else f"-# {link}"
-    link = _spoiler(f"[{BLANK}]({fixed})", m.spoiler)
-    return f"-# {quip} {link}" if quip else link
+    source = f"[{m.site.label}](<{md_url(sites.source_url(m))}>)"
+    link = _spoiler(f"[{fixer_name}]({fixed})", m.spoiler)
+    return "-# " + SEPARATOR.join([source, link, *([quip] if quip else [])])
 
 
 def format_upload(m: LinkMatch, quip: str | None = None, style: Style | None = None) -> str:
     """Text for the upload fallback (the media is attached, so there's no fixer link to preview)."""
     if (style or _style) == "subtle":
-        link = _spoiler(f"[{_who(m)}](<{m.url}>)", m.spoiler)
+        link = _spoiler(f"[{_who(m)}](<{md_url(m.url)}>)", m.spoiler)
         return f"-# {link}{SEPARATOR}{quip}" if quip else f"-# {link}"
-    return f"-# {quip}" if quip else ""
+    return f"-# {_head(m, quip)}"

@@ -46,6 +46,13 @@ def test_find_galleries_caps_at_four():
 
 
 
+def test_blocked_tags_in_any_namespace():
+    for tag in ("female:lolicon", "male:shotacon", "other:toddlercon", "LOLICON", "mixed:Shotacon"):
+        assert ehentai.is_blocked(meta(tags=["parody:x", tag])), tag
+    assert not ehentai.is_blocked(meta())
+    assert not ehentai.is_blocked(meta(tags=[]))
+
+
 def test_parse_gdata_drops_errors():
     payload = {"gmetadata": [meta(), {"gid": 5, "error": "Key missing, or incorrect key provided."}]}
     assert list(ehentai.parse_gdata(payload)) == [618395]

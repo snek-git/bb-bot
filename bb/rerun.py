@@ -97,5 +97,6 @@ async def record_rerun(
 
 def rerun_quip(hit: RerunHit) -> str:
     """The rerun callout. The earlier poster is named by stored display name, never pinged."""
-    author = discord.utils.escape_markdown(hit.post.author_name)
+    # Names are user-controlled: no formatting, and no mention text that could ping someone.
+    author = discord.utils.escape_mentions(discord.utils.escape_markdown(hit.post.author_name))
     return strings.line("quip.rerun", author=author, ago=hit.ago, jump=hit.jump)

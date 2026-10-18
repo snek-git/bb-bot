@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import sqlite3
+
 import pytest
 
+from bb import db as dbmod
 from bb import strings
-from bb.db import HealthRow, RepostRow
+from bb.db import Database, HealthRow, RepostRow
 from bb.links.model import Fixer, LinkMatch, Site
-from bb.render import BLANK, format_repost, format_upload
+from bb.render import format_repost, format_upload
 from bb.settings_store import GuildSettings, SettingsStore
 from bb.timeutil import humanize_ago
 
@@ -51,7 +54,7 @@ def test_humanize_ago(seconds, expected):
 
 async def test_settings_roundtrip(db):
     store = SettingsStore(db)
-    assert (await store.get(1)).quip_rate == 100
+    assert (await store.get(1)).quip_rate == 0  # off by default
     await store.update(1, quip_rate=3, sites_enabled={**GuildSettings().sites_enabled, "tiktok": False})
     fresh = SettingsStore(db)
     loaded = await fresh.get(1)
@@ -136,6 +139,77 @@ async def test_fixer_health(db):
     assert health["fxtwitter"].healthy is True and health["fxtwitter"].last_checked == 20.0
 
 
+async def _user_version(database) -> int:
+    async with database.conn.execute("PRAGMA user_version") as cursor:
+        return (await cursor.fetchone())[0]
+
+
+async def test_new_database_gets_the_current_schema_version(db):
+    assert await _user_version(db) == dbmod.SCHEMA_VERSION
+
+
+async def test_migrations_run_in_order(tmp_path, monkeypatch):
+    path = str(tmp_path / "bb.db")
+    first = Database(path)
+    await first.connect()
+    await first.close()
+    monkeypatch.setattr(dbmod, "SCHEMA_VERSION", 2)
+    monkeypatch.setattr(dbmod, "MIGRATIONS", {2: "ALTER TABLE posts ADD COLUMN note TEXT;"})
+    second = Database(path)
+    await second.connect()
+    assert await _user_version(second) == 2
+    async with second.conn.execute("PRAGMA table_info(posts)") as cursor:
+        assert "note" in {row[1] for row in await cursor.fetchall()}
+    await second.close()
+
+
+async def test_new_database_starts_at_the_latest_version_without_migrating(tmp_path, monkeypatch):
+    # SCHEMA already has the latest shape: replaying ALTERs on top of it would break a new install.
+    monkeypatch.setattr(dbmod, "SCHEMA_VERSION", 2)
+    monkeypatch.setattr(dbmod, "MIGRATIONS", {2: "ALTER TABLE posts ADD COLUMN created_at REAL;"})
+    database = Database(str(tmp_path / "bb.db"))
+    await database.connect()  # would fail with "duplicate column" if the step ran
+    assert await _user_version(database) == 2
+    await database.close()
+
+
+async def test_unversioned_database_counts_as_version_one(tmp_path):
+    path = tmp_path / "bb.db"
+    first = Database(str(path))
+    await first.connect()
+    await first.close()
+    with sqlite3.connect(path) as conn:
+        conn.execute("PRAGMA user_version = 0")  # made before versioning existed
+    conn.close()
+    second = Database(str(path))
+    await second.connect()
+    assert await _user_version(second) == 1
+    await second.close()
+
+
+async def test_database_from_a_newer_bb_is_refused(tmp_path):
+    path = tmp_path / "bb.db"
+    first = Database(str(path))
+    await first.connect()
+    await first.close()
+    with sqlite3.connect(path) as conn:
+        conn.execute(f"PRAGMA user_version = {dbmod.SCHEMA_VERSION + 1}")
+    conn.close()
+    with pytest.raises(RuntimeError, match="newer"):
+        await Database(str(path)).connect()
+
+
+async def test_missing_repost_column_fails_at_startup(tmp_path):
+    path = tmp_path / "bb.db"
+    with sqlite3.connect(path) as conn:
+        # an older table: the indexed columns exist, others (e.g. translated) don't
+        conn.execute(
+            "CREATE TABLE reposts (repost_id INTEGER PRIMARY KEY, origin_message_id INTEGER, created_at REAL)"
+        )
+    with pytest.raises(RuntimeError, match="missing columns"):
+        await Database(str(path)).connect()
+
+
 # --- render -----------------------------------------------------------------------------
 
 _FX = Fixer("fxtwitter", "FxTwitter", "fxtwitter.com", translatable=True)
@@ -147,10 +221,22 @@ _FIXED = "https://fxtwitter.com/bb/status/1"
 
 def test_format_repost_hidden():
     m = LinkMatch(_SITE, "https://x.com/bb/status/1", "twitter:1", author="bb", author_url="https://x.com/bb")
-    assert format_repost(m, "FxTwitter", _FIXED, style="hidden") == f"[{BLANK}]({_FIXED})"
-    assert format_repost(m, "FxTwitter", _FIXED, quip="hi", style="hidden") == f"-# hi [{BLANK}]({_FIXED})"
-    assert format_upload(m, "hi", style="hidden") == "-# hi"
-    assert format_upload(m, style="hidden") == ""
+    src = "[Tweet](<https://x.com/bb/status/1>)"  # the real post, not previewed
+    fx = f"[FxTwitter]({_FIXED})"  # the previewed link, and the one people copy to post elsewhere
+    assert format_repost(m, "FxTwitter", _FIXED, style="hidden") == f"-# {src} · {fx}"
+    assert format_repost(m, "FxTwitter", _FIXED, quip="hi", style="hidden") == f"-# {src} · {fx} · hi"
+    assert format_upload(m, "hi", style="hidden") == f"-# {src} · hi"
+    assert format_upload(m, style="hidden") == f"-# {src}"
+
+
+def test_tweet_link_points_to_the_real_post_for_meme_domains():
+    m = LinkMatch(
+        _SITE, "https://girlcockx.com/bb/status/1", "twitter:1",
+        parts={"already_fixed": "1", "mirror": "1", "user": "bb", "id": "1"},
+    )
+    assert format_repost(m, "FxTwitter", _FIXED, style="hidden").startswith(
+        "-# [Tweet](<https://x.com/bb/status/1>) "
+    )
 
 
 def test_format_repost_subtle():
@@ -165,7 +251,9 @@ def test_format_repost_subtle():
 
 def test_format_spoiler():
     m = LinkMatch(_SITE, "https://x.com/i/status/1", "twitter:1", spoiler=True)
-    assert format_repost(m, "FxTwitter", _FIXED, style="hidden") == f"||[{BLANK}]({_FIXED}) ||"
+    assert format_repost(m, "FxTwitter", _FIXED, style="hidden") == (
+        f"-# [Tweet](<https://x.com/i/status/1>) · ||[FxTwitter]({_FIXED}) ||"
+    )
     assert format_repost(m, "FxTwitter", _FIXED, style="subtle") == f"-# ||[Twitter post]({_FIXED}) ||"
 
 

@@ -206,3 +206,29 @@ def test_times_reads_naturally():
     from bb.cogs.roundup import times
 
     assert [times(n) for n in (1, 2, 3)] == ["once", "twice", "3 times"]
+
+
+async def test_failed_save_does_not_repost_every_tick(db):
+    # The audit's repro: if saving roundup_last_sent fails, the next ticks must not post again.
+    store = SettingsStore(db)
+    await store.update(1, roundup_channel_id=5)
+    sent = []
+
+    async def send(**kwargs):
+        sent.append(kwargs)
+
+    channel = SimpleNamespace(send=send)
+    guild = SimpleNamespace(id=1, get_channel_or_thread=lambda cid: channel)
+    cog = Roundup(SimpleNamespace(db=db, settings=store, guilds=[guild]))
+
+    async def broken_save(*args, **kwargs):
+        raise OSError("database or disk is full")
+
+    db.set_guild_settings = broken_save
+    slot = latest_slot(datetime(2026, 10, 18, tzinfo=UTC).timestamp(), "UTC", 6, 18)
+    for tick in range(5):  # five 5-minute ticks
+        try:
+            await cog.maybe_post(guild, slot + 60 + tick * 300)
+        except OSError:
+            pass
+    assert len(sent) == 1

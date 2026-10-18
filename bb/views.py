@@ -15,7 +15,6 @@ from typing import Any
 import discord
 
 from bb import strings
-from bb.links import sites
 
 log = logging.getLogger(__name__)
 
@@ -132,36 +131,24 @@ DYNAMIC_ITEMS = (DeleteButton, TranslateButton, FindSourceButton)
 
 SHOW_DELETE = False  # Delete is parked until we decide who may use it; its handler still works.
 
-_OPEN_LABELS = {"twitter": "Open on X"}
-
-
-def open_label(site_id: str) -> str:
-    if site_id in _OPEN_LABELS:
-        return _OPEN_LABELS[site_id]
-    site = sites.SITES.get(site_id)
-    return f"Open on {site.name if site else site_id.title()}"
-
-
 def make_repost_view(
     *,
     site_id: str,
     origin_author_id: int,
     translated: bool = False,
     has_image: bool = False,
-    original_url: str | None = None,
+    translatable: bool | None = None,
 ) -> discord.ui.View:
-    """Find source when has_image; Translate (or Original, when translated) for twitter; a link button to
-    the original post when original_url is given (pass sites.source_url(match), never a fixer URL).
+    """Find source when has_image; Translate (or Original, when translated) for twitter. (The link to the
+    original post is the small "Tweet" line in the message text.)
 
     Buttons are DynamicItems registered by the buttons cog, so this view needs no timeout or state.
     """
     view = discord.ui.View(timeout=None)
     if has_image:
         view.add_item(FindSourceButton())
-    if site_id == "twitter":
+    if site_id == "twitter" if translatable is None else translatable:
         view.add_item(TranslateButton(translated))
     if SHOW_DELETE:
         view.add_item(DeleteButton(origin_author_id))
-    if original_url:
-        view.add_item(discord.ui.Button(label=open_label(site_id), url=original_url))
     return view

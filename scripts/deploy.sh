@@ -11,7 +11,8 @@ uv run ruff check bb tests
 uv run pytest -q -p no:warnings
 
 echo "== copying to $HOST:$DEST"
-rsync -az --delete \
+# A local .env replaces the server's; without one, --delete must still never remove the server's.
+rsync -az --delete --filter 'protect .env' \
   --exclude .venv --exclude data --exclude .git --exclude __pycache__ \
   --exclude .pytest_cache --exclude .ruff_cache --exclude dryrun-report.md --exclude .DS_Store \
   ./ "$HOST:$DEST/"

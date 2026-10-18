@@ -11,11 +11,13 @@ import discord
 from discord.ext import commands
 
 from bb import strings
+from bb.cogs.findsource import pick_image_url
+from bb.cogs.linkfix import is_history
+from bb.cooldown import Cooldown
 from bb.links import extract, resolve, sites
 
 log = logging.getLogger(__name__)
 
-COOLDOWN_SECONDS = 30.0
 _HELP = re.compile(r"\bhelp\b", re.IGNORECASE)
 
 
@@ -37,25 +39,6 @@ def settings_channel_id(channel: Any) -> int:
     if isinstance(channel, discord.Thread) and channel.parent_id:
         return channel.parent_id
     return channel.id
-
-
-class Cooldown:
-    """At most one hit per key per `seconds`."""
-
-    def __init__(self, seconds: float = COOLDOWN_SECONDS) -> None:
-        self.seconds = seconds
-        self._last: dict[int, float] = {}
-
-    def ready(self, key: int, now: float | None = None) -> bool:
-        """True (and starts the cooldown) if `key` may act now."""
-        now = time.monotonic() if now is None else now
-        if len(self._last) > 512:
-            self._last = {k: t for k, t in self._last.items() if now - t < self.seconds}
-        last = self._last.get(key)
-        if last is not None and now - last < self.seconds:
-            return False
-        self._last[key] = now
-        return True
 
 
 async def has_supported_link(content: str, session: Any) -> bool:
@@ -81,8 +64,14 @@ class Chat(commands.Cog):
             return
         if not pings_bot(message.content, me.id):
             return
+        if is_history(message.created_at.timestamp(), time.time()):
+            return  # a replayed or old message: never answer pings from the past
         settings = await self.bot.settings.get(message.guild.id)
-        if not settings.channel_enabled(settings_channel_id(message.channel)):
+        if settings.paused or not settings.channel_enabled(settings_channel_id(message.channel)):
+            return
+        image_url = await self.image_to_search(message)
+        if image_url is not None:
+            await self.find_source(message, image_url)
             return
         try:
             if await has_supported_link(message.content, self.bot.http_client):
@@ -98,6 +87,37 @@ class Chat(commands.Cog):
             await message.reply(text, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
         except discord.HTTPException as exc:
             log.debug("ping reply failed: %r", exc)
+
+
+    async def image_to_search(self, message: discord.Message) -> str | None:
+        """@BB with an image: the image uploaded with the ping, else the image in the message it replies to
+        (an upload, or a repost's preview)."""
+        url = pick_image_url(message.attachments, ())  # the ping's own previews aren't ready yet
+        if url is not None:
+            return url
+        ref = message.reference
+        if ref is None or ref.message_id is None:
+            return None
+        target = ref.resolved if isinstance(ref.resolved, discord.Message) else None
+        if target is None:
+            try:
+                target = await message.channel.fetch_message(ref.message_id)
+            except discord.HTTPException:
+                return None
+        return pick_image_url(target.attachments, target.embeds)
+
+    async def find_source(self, message: discord.Message, image_url: str) -> None:
+        finder = self.bot.get_cog("FindSource")
+        if finder is None or not self.cooldown.ready(message.author.id):
+            return
+        try:
+            async with message.channel.typing():
+                text, view = await finder.answer(image_url)
+            await message.reply(
+                text, view=view, mention_author=False, allowed_mentions=discord.AllowedMentions.none()
+            )
+        except discord.HTTPException as exc:
+            log.debug("find source reply failed: %r", exc)
 
 
 async def setup(bot: Any) -> None:

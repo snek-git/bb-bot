@@ -210,9 +210,15 @@ def describe(
         local = (now or datetime.now(zone(s.timezone))).astimezone(zone(s.timezone))
         return f"Timezone: {s.timezone} (now {local:%H:%M} there)\nUsed for the weekly roundup."
     if section == "status":
+        paused = (
+            "**BB is paused.** She posts nothing (fixes, cards, replies, roundup, alerts) "
+            "until you unpause her.\n\n"
+            if s.paused
+            else ""
+        )
         perms = "\n".join(f"{'+' if ok else '-'} {label}" for label, ok in permission_report(app_permissions))
         fixers = "\n".join(fixer_report(sites.SITES.values(), down_fixers))
-        return f"BB's permissions in this channel:\n```diff\n{perms}\n```\nFixers:\n{fixers}"
+        return f"{paused}BB's permissions in this channel:\n```diff\n{perms}\n```\nFixers:\n{fixers}"
     raise KeyError(section)
 
 
@@ -603,6 +609,7 @@ def _build_timezone(p: SettingsPanel) -> None:
 
 
 def _build_status(p: SettingsPanel) -> None:
+    p.add_item(ToggleButton("paused", "Paused", p.settings.paused, row=1))
     p.add_item(RefreshButton(row=1))
 
 
@@ -686,7 +693,7 @@ class SettingsPanel(discord.ui.View):
 
     async def apply(self, interaction: discord.Interaction, **changes: Any) -> None:
         self.settings = await self.bot.settings.update(self.guild_id, **changes)
-        await self.show(interaction, notice=strings.line("settings.saved"))
+        await self.show(interaction, notice="Saved.")
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         return interaction.user.id == self.owner_id
