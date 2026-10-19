@@ -7,6 +7,7 @@ entry in the right-click Apps menu on any message with an image.
 from __future__ import annotations
 
 import logging
+import re
 from collections import OrderedDict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -18,7 +19,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bb import strings
+from bb import render, strings
 from bb.cooldown import Cooldown
 
 log = logging.getLogger(__name__)
@@ -47,6 +48,9 @@ class SauceResult:
     similarity: float
     source: str
     url: str
+    characters: tuple[str, ...] = ()  # from the art boards (Danbooru, Gelbooru, ...)
+    artist: str | None = None
+    original: str | None = None  # where the artist posted it, when the art board knows
 
 
 # --- pure helpers -----------------------------------------------------------------------
@@ -123,11 +127,65 @@ def parse_saucenao(
         if url is None or url in seen:
             continue
         seen.add(url)
+        characters, artist, original = _credits(result.get("data") or {}, url)
         found.append(
-            SauceResult(similarity, _source_name(str(result_header.get("index_name", "")), url), url)
+            SauceResult(
+                similarity, _source_name(str(result_header.get("index_name", "")), url), url,
+                characters, artist, original,
+            )
         )
     found.sort(key=lambda r: r.similarity, reverse=True)
     return found[:limit]
+
+
+MAX_CHARACTERS = 3
+
+
+def _credits(data: dict[str, Any], url: str) -> tuple[tuple[str, ...], str | None, str | None]:
+    """(characters, artist, original post) from one result's data. Field names differ per index:
+    art boards use characters/creator/source, Pixiv member_name, deviantArt author_name."""
+    raw_characters = data.get("characters")
+    characters = tuple(
+        c.strip() for c in raw_characters.split(",") if c.strip()
+    ) if isinstance(raw_characters, str) else ()
+    artist: Any = (
+        data.get("creator") or data.get("member_name") or data.get("author_name")
+        or data.get("twitter_user_handle")
+    )
+    if isinstance(artist, list):
+        artist = ", ".join(str(a) for a in artist if a)
+    source = data.get("source")
+    original = source if isinstance(source, str) and source.startswith(("https://", "http://")) else None
+    if original == url:
+        original = None
+    return characters, (str(artist).strip() or None) if artist else None, original
+
+
+def _plain(text: str) -> str:
+    """Names come from other sites: no formatting, no pings."""
+    return discord.utils.escape_mentions(discord.utils.escape_markdown(text))
+
+
+def _character_name(tag: str) -> str:
+    """'okita souji (fate)' -> 'Okita Souji (Fate)'."""
+    return _WORD_START.sub(lambda m: m.group(1) + m.group(2).upper(), " ".join(tag.split()))
+
+
+_WORD_START = re.compile(r"(^|[\s(/])([a-z])")
+
+
+def format_credits(r: SauceResult) -> str:
+    parts = []
+    if r.characters:
+        shown = ", ".join(_plain(_character_name(c)) for c in r.characters[:MAX_CHARACTERS])
+        more = len(r.characters) - MAX_CHARACTERS
+        parts.append(f"{shown} +{more}" if more > 0 else shown)
+    if r.artist:
+        parts.append(f"by {_plain(r.artist)}")
+    if r.original:
+        link = f"[original](<{render.md_url(r.original)}>)"
+        return f"{' '.join(parts)} · {link}" if parts else link
+    return " ".join(parts)
 
 
 def format_similarity(similarity: float) -> str:
@@ -139,7 +197,12 @@ def format_results(results: list[SauceResult]) -> str:
     BB only talks when there's nothing to show."""
     if not results:
         return strings.line("findsource.none")
-    return "\n".join(f"- [{r.source}](<{r.url}>) {format_similarity(r.similarity)}%" for r in results)
+    lines = []
+    for r in results:
+        line = f"- [{r.source}](<{render.md_url(r.url)}>) {format_similarity(r.similarity)}%"
+        credits = format_credits(r)
+        lines.append(f"{line} · {credits}" if credits else line)
+    return "\n".join(lines)
 
 
 def links_view(image_url: str) -> discord.ui.View:

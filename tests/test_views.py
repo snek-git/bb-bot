@@ -230,6 +230,67 @@ async def test_delete_by_poster_restores_hidden_preview(db):
     original.edit.assert_awaited_once_with(suppress=False)
 
 
+# --- the "Remove BB's repost" right-click menu -------------------------------------------
+
+
+async def test_remove_menu_by_poster_removes_privately(db):
+    await db.insert_repost(make_row())
+    await db.insert_post(guild_id=1, channel_id=5, message_id=100, author_id=7, author_name="bob",
+                         site="twitter", canonical_key="twitter:1")
+    original = SimpleNamespace(flags=SimpleNamespace(suppress_embeds=True), edit=AsyncMock())
+    channel = SimpleNamespace(id=5, fetch_message=AsyncMock(return_value=original))
+    message = make_message()
+    interaction = make_interaction(user_id=7, message=message, channel=channel)
+    await buttons.Buttons(make_bot(db)).remove_menu_used(interaction, message)
+    message.delete.assert_awaited_once()
+    assert await db.get_repost(500) is None
+    assert await db.post_keys_for_message(100) == {"twitter:1"}  # repost roasts still know the link
+    original.edit.assert_awaited_once_with(suppress=False)  # the original's own preview comes back
+    name, _, kwargs = interaction.response.calls[0]
+    assert name == "defer" and kwargs == {"ephemeral": True, "thinking": True}
+    args, kwargs = interaction.followup.send.await_args
+    assert args[0] in strings.variants("delete.done") and kwargs["ephemeral"] is True
+
+
+async def test_remove_menu_refuses_strangers_and_allows_mods(db):
+    await db.insert_repost(make_row())
+    message = make_message()
+    stranger = make_interaction(user_id=8, message=message)
+    cog = buttons.Buttons(make_bot(db))
+    await cog.remove_menu_used(stranger, message)
+    message.delete.assert_not_awaited()
+    assert stranger.response.calls[0][2]["ephemeral"] is True
+    channel = SimpleNamespace(id=5, fetch_message=AsyncMock(side_effect=discord.NotFound(
+        SimpleNamespace(status=404, reason="gone"), "gone"
+    )))
+    mod = make_interaction(user_id=9, message=message, manage_messages=True, channel=channel)
+    await cog.remove_menu_used(mod, message)
+    message.delete.assert_awaited_once()
+
+
+async def test_remove_menu_on_someone_elses_message(db):
+    message = make_message(message_id=777)  # not one of BB's reposts
+    interaction = make_interaction(user_id=7, message=message)
+    await buttons.Buttons(make_bot(db)).remove_menu_used(interaction, message)
+    name, args, kwargs = interaction.response.calls[0]
+    assert name == "send_message" and kwargs["ephemeral"] is True
+    assert args[0] in strings.variants("delete.not_repost")
+    message.delete.assert_not_awaited()
+
+
+async def test_remove_menu_is_registered_and_removed(db):
+    added, removed = [], []
+    bot = make_bot(db)
+    bot.tree = SimpleNamespace(
+        add_command=added.append, remove_command=lambda name, type: removed.append(name)
+    )
+    bot.add_dynamic_items = bot.remove_dynamic_items = lambda *items: None
+    cog = buttons.Buttons(bot)
+    await cog.cog_load()
+    await cog.cog_unload()
+    assert [c.name for c in added] == ["Remove BB's repost"] and removed == ["Remove BB's repost"]
+
+
 async def test_delete_keeps_preview_hidden_while_other_reposts_remain(db):
     await db.insert_repost(make_row())
     await db.insert_repost(make_row(repost_id=501, canonical_key="twitter:2"))

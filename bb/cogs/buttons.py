@@ -1,4 +1,4 @@
-"""Repost buttons: Delete, Translate, Find source.
+"""Repost buttons (Delete, Translate, Find source) and the "Remove BB's repost" right-click menu.
 
 The DynamicItems live in bb.views; this cog registers them and does the work.
 """
@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from bb import render, strings, views
@@ -77,16 +78,39 @@ def webhook_id_for(row: RepostRow | None, message: Any) -> int | None:
 class Buttons(commands.Cog):
     def __init__(self, bot: Any) -> None:
         self.bot = bot
+        # Removing a repost lives in the right-click menu (Apps), so reposts carry no Delete button.
+        self.remove_menu = app_commands.ContextMenu(name="Remove BB's repost", callback=self.remove_menu_used)
 
     async def cog_load(self) -> None:
         self.bot.add_dynamic_items(*views.DYNAMIC_ITEMS)
+        self.bot.tree.add_command(self.remove_menu)
 
     async def cog_unload(self) -> None:
         self.bot.remove_dynamic_items(*views.DYNAMIC_ITEMS)
+        self.bot.tree.remove_command(self.remove_menu.name, type=self.remove_menu.type)
 
     # --- delete -------------------------------------------------------------------------
 
     async def on_delete(self, interaction: discord.Interaction, origin_author_id: int) -> None:
+        message = interaction.message
+        if message is None:
+            return
+        await self._remove(interaction, message, origin_author_id, from_menu=False)
+
+    async def remove_menu_used(self, interaction: discord.Interaction, message: discord.Message) -> None:
+        row = await self.bot.db.get_repost(message.id)
+        if row is None:
+            await interaction.response.send_message(
+                strings.line("delete.not_repost"), ephemeral=True, allowed_mentions=_NO_MENTIONS
+            )
+            return
+        await self._remove(interaction, message, row.origin_author_id, from_menu=True)
+
+    async def _remove(
+        self, interaction: discord.Interaction, message: Any, origin_author_id: int, *, from_menu: bool
+    ) -> None:
+        """Take one repost down: only its poster or someone with Manage Messages. The post record stays
+        (repost roasts still know the link); the original gets its own preview back."""
         manage = bool(interaction.permissions.manage_messages)
         if not can_delete(interaction.user.id, origin_author_id, manage):
             await interaction.response.send_message(
@@ -95,10 +119,10 @@ class Buttons(commands.Cog):
                 allowed_mentions=_NO_MENTIONS,
             )
             return
-        message = interaction.message
-        if message is None:
-            return
-        await interaction.response.defer()
+        if from_menu:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+        else:
+            await interaction.response.defer()
         row = await self.bot.db.get_repost(message.id)
         try:
             await self._delete_message(message, webhook_id_for(row, message), interaction.channel)
@@ -109,6 +133,8 @@ class Buttons(commands.Cog):
         await self.bot.db.delete_repost(message.id)
         if row is not None:
             await self._restore_original(interaction.channel, row.origin_message_id)
+        if from_menu:
+            await interaction.followup.send(strings.line("delete.done"), ephemeral=True)
 
     async def _delete_message(self, message: Any, webhook_id: int | None, channel: Any) -> None:
         """Through the webhook when the repost came from one; directly otherwise, or if that fails

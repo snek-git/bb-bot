@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import random
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -18,7 +19,7 @@ from bb.db import RepostRow
 from bb.links import extract, resolve, sites
 from bb.links.extract import FoundURL
 from bb.links.model import Fixer, LinkMatch, Site
-from bb.settings_store import GuildSettings, SettingsStore
+from bb.settings_store import GuildSettings, RareLine, SettingsStore
 
 G, CH = 1, 10
 FX = Fixer("fxtwitter", "FxTwitter", "fxtwitter.com", translatable=True)
@@ -47,6 +48,9 @@ class FixedRng:
 
     def randrange(self, n: int) -> int:
         return min(self.value, n - 1)
+
+    def choice(self, seq):
+        return seq[min(self.value, len(seq) - 1)]
 
 
 # --- pure decisions --------------------------------------------------------------------------
@@ -877,15 +881,16 @@ async def test_cards_can_be_turned_off(h, db, cards, monkeypatch):
 
 # --- the rare custom line ----------------------------------------------------------------
 
-RARE = replace(GuildSettings(), rare_text="{target} BB thinks about you a lot♡", rare_target_id=42)
+PING = RareLine("{target} BB thinks about you a lot♡", 42)
+PLAIN = RareLine("BB is bored. Entertain me♡")  # no target: just said, pings nobody
+RARE = replace(GuildSettings(), rare_lines=(PING,))
 
 
 def test_rare_line_pings_its_target():
-    assert lf.rare_line(RARE) == "<@42> BB thinks about you a lot♡"
-    no_slot = replace(RARE, rare_text="hello")
-    assert lf.rare_line(no_slot) == "<@42> hello"  # ping goes first when the text has no {target}
-    nobody = replace(RARE, rare_target_id=None)
-    assert lf.rare_line(nobody) == "BB thinks about you a lot♡"
+    assert lf.rare_line(PING) == "<@42> BB thinks about you a lot♡"
+    assert lf.rare_line(RareLine("hello", 42)) == "<@42> hello"  # ping goes first without a {target}
+    assert lf.rare_line(RareLine("{target} BB thinks about you a lot♡")) == "BB thinks about you a lot♡"
+    assert lf.rare_line(PLAIN) == "BB is bored. Entertain me♡"
 
 
 def test_rare_line_odds_and_priority():
@@ -893,39 +898,48 @@ def test_rare_line_odds_and_priority():
     assert hit == "<@42> BB thinks about you a lot♡"
     assert lf.choose_quip(RARE, rerun_line=None, site_name="X", rng=FixedRng(7)) is None  # 7 != 0
     assert lf.choose_quip(RARE, rerun_line="roast", site_name="X", rng=FixedRng(0)) == "roast"
-    off = replace(RARE, rare_text="")
+    off = replace(RARE, rare_lines=())
     normal = lf.choose_quip(off, rerun_line=None, site_name="X", rng=FixedRng(0))
     assert normal != hit and "<@42>" not in (normal or "")
 
 
-def test_only_the_rare_target_can_be_pinged():
+def test_rare_lines_are_picked_at_random():
+    both = replace(GuildSettings(), rare_lines=(PING, PLAIN), rare_rate=1)  # always fires
+    seen = {
+        lf.choose_quip(both, rerun_line=None, site_name="X", rng=random.Random(seed)) for seed in range(400)
+    }
+    assert {lf.rare_line(PING), lf.rare_line(PLAIN)} <= seen
+
+
+def test_only_rare_targets_can_be_pinged():
     mentions = lf.send_mentions(RARE, "-# <@42> hi <@99>", reply=True)
     assert [u.id for u in mentions.users] == [42]
     assert mentions.everyone is False and mentions.roles is False
     quiet = lf.send_mentions(RARE, "-# a normal quip", reply=True)
     assert quiet.users is False and quiet.replied_user is False  # silent mode: nobody
     assert lf.pings_target(RARE, "x <@42>") and not lf.pings_target(RARE, None)
+    plain = replace(GuildSettings(), rare_lines=(PLAIN,))
+    assert lf.send_mentions(plain, f"-# {lf.rare_line(PLAIN)}", reply=True).users is False
 
 
 async def test_armed_rare_line_fires_once(h, db):
     h.embed_script = [[text_embed().to_dict()], [text_embed().to_dict()]]
-    await h.quiet(rare_text="{target} hi♡", rare_target_id=42, rare_armed=True)
+    await h.quiet(rare_lines=(PLAIN, RareLine("{target} hi♡", 42)), rare_armed=1)
     await h.cog.process(message("https://x.com/a/status/1", mid=400))
     await h.cog.process(message("https://x.com/a/status/2", mid=500))
     first, second = h.sent[0][0], h.sent[1][0]
-    assert first.endswith(" · <@42> hi♡")
+    assert first.endswith(" · <@42> hi♡")  # the armed line, not a random one
     assert "<@42>" not in second
-    assert (await h.bot.settings.get(G)).rare_armed is False
+    assert (await h.bot.settings.get(G)).rare_armed is None
 
 
 async def test_armed_rare_line_waits_out_a_repost_roast(h, db):
     h.embed_script = [[text_embed().to_dict()], [text_embed().to_dict()]]
     await h.cog.process(message("https://x.com/a/status/1", mid=400, author_id=100, name="alice"))
-    await h.quiet(rare_text="{target} hi♡", rare_target_id=42, rare_armed=True)
+    await h.quiet(rare_lines=(RareLine("{target} hi♡", 42),), rare_armed=0)
     await h.cog.process(message("https://x.com/a/status/1", mid=500, author_id=200, name="bob"))
     assert "alice" in h.sent[1][0] and "<@42>" not in h.sent[1][0]  # the roast wins
-    assert (await h.bot.settings.get(G)).rare_armed is True  # still armed for the next link
-
+    assert (await h.bot.settings.get(G)).rare_armed == 0  # still armed for the next link
 
 
 async def test_image_guess_without_the_network(db):

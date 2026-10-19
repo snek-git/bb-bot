@@ -18,8 +18,8 @@ from discord.ext import commands
 from bb import strings
 from bb.cogs.linkfix import rare_line
 from bb.links import sites
-from bb.settings_store import SITE_IDS, GuildSettings
-from bb.timeutil import zone
+from bb.settings_store import MAX_RARE_LINES, SITE_IDS, GuildSettings, RareLine
+from bb.timeutil import now, zone
 
 log = logging.getLogger(__name__)
 
@@ -137,6 +137,31 @@ def fixer_report(site_list: Iterable[Any], down: Collection[str]) -> list[str]:
     return lines
 
 
+def _clip(text: str, limit: int) -> str:
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
+def describe_rare(s: GuildSettings) -> str:
+    odds = "off" if s.rare_rate <= 0 else f"1 in {s.rare_rate} fixed links"
+    if not s.rare_lines:
+        return (
+            f"No lines yet.\nOdds: {odds}\n"
+            "-# Add a line to switch it on. A line can ping someone (put {target} where the ping goes) "
+            "or just be said."
+        )
+    rows: list[str] = []
+    for i, line in enumerate(s.rare_lines):
+        who = f"pings <@{line.target_id}>" if line.target_id else "no ping"
+        armed = " · **next link**" if s.rare_armed == i else ""
+        row = f"{i + 1}. {_clip(line.text, 48)} ({who}){armed}"
+        if sum(len(r) + 1 for r in rows) + len(row) > 1500:  # Discord caps a message at 2000 characters
+            rows.append(f"…and {len(s.rare_lines) - i} more")
+            break
+        rows.append(row)
+    return "Lines (BB picks one at random):\n" + "\n".join(rows) + f"\nOdds: {odds}"
+
+
 def _channel(channel_id: int | None) -> str:
     return f"<#{channel_id}>" if channel_id else "off"
 
@@ -179,13 +204,7 @@ def describe(
             f"Lewd channels: {lewd}\nChaos channels: {chaos}"
         )
     if section == "rare":
-        text = s.rare_text.strip()
-        message = "\n".join(f"> {line}" for line in text.splitlines()) if text else "not written yet"
-        who = f"<@{s.rare_target_id}>" if s.rare_target_id else "nobody"
-        odds = "off" if s.rare_rate <= 0 else f"1 in {s.rare_rate} fixed links"
-        hint = "" if text else "\n-# Write a message to switch it on. Put {target} where the ping should go."
-        armed = "\nArmed: the next fixed link gets it." if s.rare_armed and text else ""
-        return f"Message:\n{message}\nPings: {who}\nOdds: {odds}{armed}{hint}"
+        return describe_rare(s)
     if section == "reruns":
         scope = "same channel" if s.rerun_same_channel else "whole server"
         return (
@@ -339,14 +358,18 @@ class UserPicker(_Item, discord.ui.UserSelect):
         await self.panel.apply(interaction, **{self.field: self.values[0].id if self.values else None})
 
 
-class RareTextModal(discord.ui.Modal):
-    def __init__(self, panel: SettingsPanel) -> None:
+class RareLineModal(discord.ui.Modal):
+    """Writes a new line (index None) or rewrites the text of an existing one (its ping stays)."""
+
+    def __init__(self, panel: SettingsPanel, index: int | None) -> None:
         super().__init__(title="Rare line", timeout=600)
-        self.panel = panel
+        self.panel, self.index = panel, index
+        lines = panel.settings.rare_lines
+        current = lines[index].text if index is not None and index < len(lines) else None
         self.input = discord.ui.TextInput(
-            label="Message ({target} = where the ping goes)",
+            label="Message ({target} marks the ping, optional)",
             style=discord.TextStyle.paragraph,
-            default=panel.settings.rare_text or None,
+            default=current,
             placeholder="{target} BB was thinking about you♡",
             max_length=1500,
             required=True,
@@ -354,20 +377,106 @@ class RareTextModal(discord.ui.Modal):
         self.add_item(self.input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        await self.panel.apply(interaction, rare_text=self.input.value.strip())
+        text = self.input.value.strip()
+        lines = list(self.panel.settings.rare_lines)
+        if self.index is None:
+            if len(lines) >= MAX_RARE_LINES:
+                await self.panel.show(interaction, notice=f"Not saved: {MAX_RARE_LINES} lines is the limit.")
+                return
+            lines.append(RareLine(text))
+            self.panel.rare_index = len(lines) - 1
+        elif self.index < len(lines):
+            lines[self.index] = RareLine(text, lines[self.index].target_id)
+        await self.panel.apply(interaction, rare_lines=tuple(lines))
+
+
+class RareLineSelect(_Item, discord.ui.Select):
+    """Which line the buttons below act on."""
+
+    def __init__(self, lines: tuple[RareLine, ...], selected: int, row: int) -> None:
+        options = [
+            discord.SelectOption(
+                label=_clip(f"{i + 1}. {line.text}", 100), value=str(i), default=i == selected
+            )
+            for i, line in enumerate(lines)
+        ]
+        super().__init__(placeholder="Line", options=options, row=row)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        self.panel.rare_index = int(self.values[0])
+        await self.panel.show(interaction)
+
+
+class RareTargetPicker(_Item, discord.ui.UserSelect):
+    """Who the selected line pings, or nobody (then it's just said)."""
+
+    def __init__(self, line: RareLine, row: int) -> None:
+        super().__init__(
+            placeholder="Who this line pings (optional)",
+            min_values=0,
+            max_values=1,
+            default_values=[discord.Object(line.target_id)] if line.target_id else [],
+            row=row,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        panel = self.panel
+        lines = list(panel.settings.rare_lines)
+        if panel.rare_index < len(lines):
+            target = self.values[0].id if self.values else None
+            lines[panel.rare_index] = RareLine(lines[panel.rare_index].text, target)
+        await panel.apply(interaction, rare_lines=tuple(lines))
+
+
+class RareRemoveButton(_Item, discord.ui.Button):
+    def __init__(self, row: int) -> None:
+        super().__init__(label="Remove", style=discord.ButtonStyle.danger, row=row)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        panel = self.panel
+        lines = list(panel.settings.rare_lines)
+        index = panel.rare_index
+        if index >= len(lines):
+            await panel.show(interaction)
+            return
+        del lines[index]
+        armed = panel.settings.rare_armed
+        if armed is not None:
+            armed = None if armed == index else (armed - 1 if armed > index else armed)
+        panel.rare_index = max(0, min(index, len(lines) - 1))
+        await panel.apply(interaction, rare_lines=tuple(lines), rare_armed=armed)
 
 
 class RarePreviewButton(_Item, discord.ui.Button):
-    """Shows the line as BB would post it, privately and without pinging anyone."""
+    """Shows the selected line as BB would post it, privately and without pinging anyone."""
 
-    def __init__(self, row: int, disabled: bool) -> None:
-        super().__init__(label="Preview", style=discord.ButtonStyle.secondary, row=row, disabled=disabled)
+    def __init__(self, row: int) -> None:
+        super().__init__(label="Preview", style=discord.ButtonStyle.secondary, row=row)
 
     async def callback(self, interaction: discord.Interaction) -> None:
+        lines = self.panel.settings.rare_lines
+        index = self.panel.rare_index
+        text = rare_line(lines[index]) if index < len(lines) else "No line selected."
         await interaction.response.send_message(
-            f"-# {rare_line(self.panel.settings)}",
-            ephemeral=True,
-            allowed_mentions=discord.AllowedMentions.none(),
+            f"-# {text}", ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+        )
+
+
+class RoundupPreviewButton(_Item, discord.ui.Button):
+    """This week's roundup as it stands now, privately: nothing is posted or marked as sent."""
+
+    def __init__(self, row: int) -> None:
+        super().__init__(label="Preview", style=discord.ButtonStyle.secondary, row=row)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        panel = self.panel
+        roundup = panel.bot.get_cog("Roundup")
+        if roundup is None:
+            await interaction.response.send_message(strings.line("error.generic"), ephemeral=True)
+            return
+        embed = await roundup.build(panel.guild_id, now(), panel.settings.brainlet_award)
+        await interaction.response.send_message(
+            embed=embed, ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
         )
 
 
@@ -489,14 +598,24 @@ def _build_quips(p: SettingsPanel) -> None:
 
 def _build_rare(p: SettingsPanel) -> None:
     s = p.settings
-    p.add_item(UserPicker("rare_target_id", s.rare_target_id, "Who gets pinged", row=1))
-    p.add_item(ChoiceSelect("rare_rate", RARE_ODDS, s.rare_rate, "Odds", row=2))
-    p.add_item(ModalButton("Write message", RareTextModal, row=3))
-    p.add_item(RarePreviewButton(row=3, disabled=not s.rare_text))
-    p.add_item(
-        SetButton("rare_armed", True, "Use on next link", row=3, disabled=not s.rare_text or s.rare_armed)
-    )
-    p.add_item(SetButton("rare_text", "", "Turn off", row=3, disabled=not s.rare_text))
+    lines = s.rare_lines
+    p.rare_index = max(0, min(p.rare_index, len(lines) - 1))
+    if lines:
+        p.add_item(RareLineSelect(lines, p.rare_index, row=1))
+        p.add_item(RareTargetPicker(lines[p.rare_index], row=2))
+    p.add_item(ChoiceSelect("rare_rate", RARE_ODDS, s.rare_rate, "Odds", row=3))
+    add = ModalButton("Add line", lambda panel: RareLineModal(panel, None), row=4)
+    add.disabled = len(lines) >= MAX_RARE_LINES
+    p.add_item(add)
+    if lines:
+        p.add_item(ModalButton("Edit", lambda panel: RareLineModal(panel, panel.rare_index), row=4))
+        p.add_item(RarePreviewButton(row=4))
+        p.add_item(
+            SetButton(
+                "rare_armed", p.rare_index, "Use on next link", row=4, disabled=s.rare_armed == p.rare_index
+            )
+        )
+        p.add_item(RareRemoveButton(row=4))
 
 
 def _build_reruns(p: SettingsPanel) -> None:
@@ -537,6 +656,7 @@ def _build_roundup(p: SettingsPanel) -> None:
         SetButton("roundup_channel_id", None, "Turn off", row=4, disabled=s.roundup_channel_id is None)
     )
     p.add_item(ToggleButton("brainlet_award", "Brainlet award", s.brainlet_award, row=4))
+    p.add_item(RoundupPreviewButton(row=4))
 
 
 def _build_alerts(p: SettingsPanel) -> None:
@@ -650,6 +770,7 @@ class SettingsPanel(discord.ui.View):
         self.bot, self.guild_id, self.owner_id, self.guild = bot, guild_id, owner_id, guild
         self.settings = settings
         self.section = section
+        self.rare_index = 0  # the line the rare-line buttons act on
         self.app_permissions = app_permissions
         self.title = strings.line("settings.title")
         self.notice: str | None = None

@@ -48,6 +48,42 @@ def test_parse_saucenao_filters_dedupes_and_limits():
     ]
 
 
+def test_results_name_the_character_artist_and_original_post():
+    data = {
+        "header": {"status": 0},
+        "results": [
+            {
+                "header": {"similarity": "93.8", "index_name": "Index #9: Danbooru - x.jpg"},
+                "data": {
+                    "ext_urls": ["https://danbooru.donmai.us/post/show/5"],
+                    "creator": "nanka0616",
+                    "characters": "okita souji (fate), okita souji alter (fate), saber, nero claudius (fate)",
+                    "source": "https://x.com/nanka0616/status/2108844411237077357",
+                },
+            },
+            {
+                "header": {"similarity": "88", "index_name": "Index #5: Pixiv Images - 1.jpg"},
+                "data": {
+                    "ext_urls": ["https://www.pixiv.net/artworks/1"],
+                    "member_name": "<@123456789012345678> *x*",
+                },
+            },
+            {
+                "header": {"similarity": "80", "index_name": "Index #12: Yande.re - y.jpg"},
+                "data": {"ext_urls": ["https://yande.re/post/show/9"]},
+            },
+        ],
+    }
+    lines = fs.format_results(fs.parse_saucenao(data)).splitlines()
+    assert lines[0] == (
+        "- [Danbooru](<https://danbooru.donmai.us/post/show/5>) 93.8% · "
+        "Okita Souji (Fate), Okita Souji Alter (Fate), Saber +1 by nanka0616 · "
+        "[original](<https://x.com/nanka0616/status/2108844411237077357>)"
+    )
+    assert "<@123" not in lines[1] and "\\*x\\*" in lines[1]  # names from other sites can't ping or format
+    assert lines[2] == "- [Yande.re](<https://yande.re/post/show/9>) 80%"  # nothing known: just the link
+
+
 def test_parse_saucenao_threshold_and_limit_are_parameters():
     results = fs.parse_saucenao(RESPONSE, min_similarity=40, limit=10)
     assert [r.similarity for r in results] == [93.21, 91.0, 75.0, 70.0, 42.0]

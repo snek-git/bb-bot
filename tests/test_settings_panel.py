@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import discord
 import pytest
@@ -11,7 +12,7 @@ import pytest
 from bb.cogs import settings as panel_mod
 from bb.links import sites
 from bb.links.model import Fixer, Site
-from bb.settings_store import SITE_IDS, GuildSettings, SettingsStore
+from bb.settings_store import SITE_IDS, GuildSettings, RareLine, SettingsStore
 
 FX = Fixer("fxtwitter", "FxTwitter", "fxtwitter.com", translatable=True)
 VX = Fixer("vxtwitter", "vxTwitter", "vxtwitter.com")
@@ -305,47 +306,84 @@ def test_settings_command_is_admin_only_and_guild_only():
 async def test_rare_line_section(panel):
     panel.section = "rare"
     panel.rebuild()
-    assert "not written yet" in panel_mod.describe("rare", panel.settings)
-    assert find(panel, panel_mod.RarePreviewButton).disabled  # nothing to preview yet
+    assert "No lines yet" in panel_mod.describe("rare", panel.settings)
+    with pytest.raises(LookupError):
+        find(panel, panel_mod.RarePreviewButton)  # nothing to preview yet
 
-    interaction = await click(panel, find(panel, panel_mod.ModalButton))
+    interaction = await click(panel, find(panel, panel_mod.ModalButton, label="Add line"))
     modal = interaction.response.calls[0][1]["modal"]
     modal.input._value = "  {target} BB was thinking about you♡  "
     await modal.on_submit(make_interaction())
-    assert panel.settings.rare_text == "{target} BB was thinking about you♡"
+    assert panel.settings.rare_lines == (RareLine("{target} BB was thinking about you♡"),)
 
-    picker = find(panel, panel_mod.UserPicker, field="rare_target_id")
+    picker = find(panel, panel_mod.RareTargetPicker)
     picker._values = [SimpleNamespace(id=42)]
     await click(panel, picker)
-    assert panel.settings.rare_target_id == 42
+    assert panel.settings.rare_lines[0].target_id == 42
     text = panel_mod.describe("rare", panel.settings)
-    assert "> {target} BB was thinking about you♡" in text and "<@42>" in text and "1 in 1000" in text
+    assert "BB was thinking about you♡" in text and "<@42>" in text and "1 in 1000" in text
 
     preview = await click(panel, find(panel, panel_mod.RarePreviewButton))
     kwargs = preview.response.calls[0][1]
     assert kwargs["ephemeral"] is True and kwargs["allowed_mentions"].users is False
     assert preview_text(preview) == "-# <@42> BB was thinking about you♡"
 
-    await click(panel, find(panel, panel_mod.SetButton, field="rare_text"))
-    assert panel.settings.rare_text == ""
+    # a second line without anyone to ping: BB just says it
+    interaction = await click(panel, find(panel, panel_mod.ModalButton, label="Add line"))
+    modal = interaction.response.calls[0][1]["modal"]
+    modal.input._value = "BB is bored♡"
+    await modal.on_submit(make_interaction())
+    assert panel.settings.rare_lines[1] == RareLine("BB is bored♡") and panel.rare_index == 1
+    assert "no ping" in panel_mod.describe("rare", panel.settings)
+
+    interaction = await click(panel, find(panel, panel_mod.ModalButton, label="Edit"))
+    modal = interaction.response.calls[0][1]["modal"]
+    modal.input._value = "BB is very bored♡"
+    await modal.on_submit(make_interaction())
+    assert panel.settings.rare_lines[1] == RareLine("BB is very bored♡")
+    assert panel.settings.rare_lines[0].target_id == 42  # the other line is untouched
 
 
 def preview_text(interaction):
     return interaction.response.sent_args[0]
 
 
-async def test_use_on_next_link_arms_the_rare_line(panel):
+async def test_use_on_next_link_arms_the_selected_line(panel):
+    await panel.bot.settings.update(1, rare_lines=(RareLine("a"), RareLine("{target} b", 42)))
+    panel.settings = await panel.bot.settings.get(1)
     panel.section = "rare"
     panel.rebuild()
-    assert find(panel, panel_mod.SetButton, field="rare_armed").disabled  # no message yet
-    await panel.bot.settings.update(1, rare_text="{target} hi")
-    panel.settings = await panel.bot.settings.get(1)
-    panel.rebuild()
+    select = find(panel, panel_mod.RareLineSelect)
+    select._values = ["1"]
+    await click(panel, select)
     await click(panel, find(panel, panel_mod.SetButton, field="rare_armed"))
-    assert panel.settings.rare_armed is True
-    assert "Armed" in panel_mod.describe("rare", panel.settings)
+    assert panel.settings.rare_armed == 1
+    assert "next link" in panel_mod.describe("rare", panel.settings)
     assert find(panel, panel_mod.SetButton, field="rare_armed").disabled  # can't double-arm
 
+
+async def test_removing_lines_keeps_the_armed_one_right(panel):
+    await panel.bot.settings.update(1, rare_lines=(RareLine("a"), RareLine("b"), RareLine("c")), rare_armed=2)
+    panel.settings = await panel.bot.settings.get(1)
+    panel.section = "rare"
+    panel.rebuild()
+    await click(panel, find(panel, panel_mod.RareRemoveButton))  # removes "a", the selected line
+    assert [line.text for line in panel.settings.rare_lines] == ["b", "c"]
+    assert panel.settings.rare_armed == 1  # still "c"
+    panel.rare_index = 1
+    panel.rebuild()
+    await click(panel, find(panel, panel_mod.RareRemoveButton))  # removes "c", the armed line
+    assert panel.settings.rare_armed is None and panel.rare_index == 0
+
+
+async def test_roundup_preview_is_private(panel):
+    embed = discord.Embed(title="Weekly report☆")
+    panel.bot.get_cog = lambda name: SimpleNamespace(build=AsyncMock(return_value=embed))
+    panel.section = "roundup"
+    panel.rebuild()
+    interaction = await click(panel, find(panel, panel_mod.RoundupPreviewButton))
+    kwargs = interaction.response.calls[0][1]
+    assert kwargs["embed"] is embed and kwargs["ephemeral"] is True
 
 
 async def test_pause_switch(panel):

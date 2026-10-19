@@ -16,6 +16,17 @@ def _all_sites_on() -> dict[str, bool]:
     return {site_id: True for site_id in SITE_IDS}
 
 
+MAX_RARE_LINES = 25  # a select menu holds 25 options
+
+
+@dataclass(frozen=True)
+class RareLine:
+    """One custom rare line. target_id: who it pings ({target} marks where), or None for a plain line."""
+
+    text: str
+    target_id: int | None = None
+
+
 @dataclass(frozen=True)
 class GuildSettings:
     # Emergency stop: BB posts nothing at all (fixes, cards, ping replies, roundup, alerts) while set.
@@ -36,11 +47,10 @@ class GuildSettings:
     # Channels whose quips come from a themed pool instead of the normal one.
     lewd_channels: tuple[int, ...] = ()  # e.g. #2d-cum-zone: flirty teasing
     chaos_channels: tuple[int, ...] = ()  # e.g. #brazil (/b/): disgusted-but-amused
-    # A custom line on 1 in rare_rate fixes that pings rare_target_id ({target} marks where the ping goes).
-    rare_text: str = ""
-    rare_target_id: int | None = None
+    # Custom lines: on 1 in rare_rate fixes, BB says one of them at random.
+    rare_lines: tuple[RareLine, ...] = ()
     rare_rate: int = 1000
-    rare_armed: bool = False  # "Use on next link": the next fixed link gets it, then this resets
+    rare_armed: int | None = None  # "Use on next link": index of the line the next fixed link gets
     timezone: str = "UTC"
     # Reruns
     reruns_enabled: bool = True
@@ -78,6 +88,7 @@ class GuildSettings:
 
     @classmethod
     def from_overrides(cls, data: dict[str, Any]) -> GuildSettings:
+        data = _upgrade_rare(data)
         known = {f.name for f in fields(cls)}
         clean = {key: value for key, value in data.items() if key in known}
         if "sites_enabled" in clean:
@@ -85,16 +96,43 @@ class GuildSettings:
         for key in CHANNEL_LIST_FIELDS:
             if key in clean:
                 clean[key] = tuple(int(c) for c in clean[key])
+        if "rare_lines" in clean:
+            clean["rare_lines"] = rare_lines(clean["rare_lines"])
         return cls(**clean)
 
     def to_overrides(self) -> dict[str, Any]:
         """Only the values that differ from the defaults, JSON-friendly."""
         defaults = asdict(GuildSettings())
         current = asdict(self)
-        for key in CHANNEL_LIST_FIELDS:
+        for key in (*CHANNEL_LIST_FIELDS, "rare_lines"):
             current[key] = list(current[key])
             defaults[key] = list(defaults[key])
         return {key: value for key, value in current.items() if value != defaults[key]}
+
+
+def rare_lines(raw: Any) -> tuple[RareLine, ...]:
+    """Lines from saved JSON (dicts) or code (RareLine), blanks dropped."""
+    lines = []
+    for item in raw or ():
+        line = item if isinstance(item, RareLine) else RareLine(
+            str(item.get("text") or ""), int(item["target_id"]) if item.get("target_id") else None
+        )
+        if line.text.strip():
+            lines.append(line)
+    return tuple(lines[:MAX_RARE_LINES])
+
+
+def _upgrade_rare(data: dict[str, Any]) -> dict[str, Any]:
+    """Settings saved before there were several lines: one rare_text/rare_target_id, a bool rare_armed."""
+    data = dict(data)
+    text = data.pop("rare_text", None)
+    target = data.pop("rare_target_id", None)
+    if "rare_lines" not in data and isinstance(text, str) and text.strip():
+        data["rare_lines"] = [{"text": text, "target_id": target}]
+    armed = data.get("rare_armed")
+    if isinstance(armed, bool):
+        data["rare_armed"] = 0 if armed and data.get("rare_lines") else None
+    return data
 
 
 class SettingsStore:
@@ -117,6 +155,8 @@ class SettingsStore:
         for key in CHANNEL_LIST_FIELDS:
             if key in changes:
                 changes[key] = tuple(int(c) for c in changes[key])
+        if "rare_lines" in changes:
+            changes["rare_lines"] = rare_lines(changes["rare_lines"])
         async with self._write_lock:
             current = await self.get(guild_id)
             updated = replace(current, **changes)

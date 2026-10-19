@@ -94,6 +94,17 @@ delete.denied:
     - "Hands off☆ That's {author}'s link, not yours."
     - "Touch other people's things again and I'll turn you into a pig♡"
 
+# "Remove BB's repost" (right-click > Apps). Only the person who used it sees these.
+delete.done:
+  vars: []
+  lines:
+    - "Gone. As if BB was never there♡"
+
+delete.not_repost:
+  vars: []
+  lines:
+    - "That's not one of BB's posts, Senpai. Pick one of mine☆"
+
 ping:
   vars: []
   lines:

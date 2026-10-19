@@ -29,7 +29,7 @@ from bb.brake import BurstBrake
 from bb.db import PostRow, RepostRow
 from bb.links import extract, resolve, sites
 from bb.links.model import Fixer, LinkMatch
-from bb.settings_store import GuildSettings
+from bb.settings_store import GuildSettings, RareLine
 from bb.timeutil import now
 
 if TYPE_CHECKING:
@@ -110,8 +110,8 @@ def choose_quip(
     """
     if rerun_line:
         return rerun_line
-    if settings.rare_text and settings.rare_rate > 0 and rng.randrange(settings.rare_rate) == 0:
-        return rare_line(settings)
+    if settings.rare_lines and settings.rare_rate > 0 and rng.randrange(settings.rare_rate) == 0:
+        return rare_line(rng.choice(settings.rare_lines))
     if settings.quip_rate <= 0 or rng.randrange(settings.quip_rate) != 0:
         return None
     flavor = settings.channel_flavor(channel_id) if channel_id is not None else None
@@ -120,26 +120,37 @@ def choose_quip(
     return strings.line("quip.fix", site=site_name)
 
 
-def rare_line(settings: GuildSettings) -> str:
-    """The custom rare line, with {target} replaced by a ping (put first if the text has no {target})."""
-    text = settings.rare_text.strip()
-    if not settings.rare_target_id:
+def rare_line(line: RareLine) -> str:
+    """A custom rare line as BB posts it. With a target, {target} becomes the ping (put first if the text
+    has no {target}); without one it's just the text."""
+    text = line.text.strip()
+    if not line.target_id:
         return text.replace("{target}", "").strip()
-    ping = f"<@{settings.rare_target_id}>"
+    ping = f"<@{line.target_id}>"
     return text.replace("{target}", ping) if "{target}" in text else f"{ping} {text}"
 
 
+def pinged_targets(settings: GuildSettings, text: str | None) -> list[int]:
+    """Rare-line targets whose ping is in the text. Only BB writes mentions into her messages (names are
+    escaped, URLs percent-encoded), so a match means a rare line put it there."""
+    if not text:
+        return []
+    targets = {line.target_id for line in settings.rare_lines if line.target_id}
+    return sorted(t for t in targets if f"<@{t}>" in text)
+
+
 def pings_target(settings: GuildSettings, text: str | None) -> bool:
-    return bool(settings.rare_target_id and text and f"<@{settings.rare_target_id}>" in text)
+    return bool(pinged_targets(settings, text))
 
 
 def send_mentions(settings: GuildSettings, text: str | None, *, reply: bool) -> discord.AllowedMentions:
-    """Nobody gets pinged by BB, except the rare line's target (and the poster in ping mode)."""
+    """Nobody gets pinged by BB, except a rare line's target (and the poster in ping mode)."""
     mentions = discord.AllowedMentions.none()
     if reply and not settings.silent:
         mentions.replied_user = True
-    if pings_target(settings, text):
-        mentions.users = [discord.Object(settings.rare_target_id)]
+    targets = pinged_targets(settings, text)
+    if targets:
+        mentions.users = [discord.Object(t) for t in targets]
     return mentions
 
 
@@ -607,9 +618,11 @@ class LinkFix(commands.Cog):
         if guild is not None and not rerun_line:
             async with self._rare_lock:  # two links at once must not both use the one-shot line
                 current = await self.bot.settings.get(guild.id)  # fresh: an earlier link may have used it
-                if current.rare_armed and current.rare_text:
-                    await self.bot.settings.update(guild.id, rare_armed=False)
-                    return rare_line(current)
+                armed = current.rare_armed
+                if armed is not None:
+                    await self.bot.settings.update(guild.id, rare_armed=None)
+                    if 0 <= armed < len(current.rare_lines):
+                        return rare_line(current.rare_lines[armed])
         return choose_quip(settings, rerun_line=rerun_line, site_name=site_name, channel_id=channel_id)
 
     async def _settle_all(self, live: list[LiveRepost]) -> list[str]:

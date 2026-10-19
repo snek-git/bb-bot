@@ -11,7 +11,7 @@ from bb import strings
 from bb.db import Database, HealthRow, RepostRow
 from bb.links.model import Fixer, LinkMatch, Site
 from bb.render import format_repost, format_upload
-from bb.settings_store import GuildSettings, SettingsStore
+from bb.settings_store import GuildSettings, RareLine, SettingsStore
 from bb.timeutil import humanize_ago
 
 # --- strings ----------------------------------------------------------------------------
@@ -75,6 +75,23 @@ async def test_themed_channels_roundtrip(db):
     assert loaded.channel_flavor(11) == "lewd"
     assert loaded.channel_flavor(20) == "chaos"
     assert loaded.channel_flavor(30) is None
+
+
+async def test_old_single_rare_line_carries_over(db):
+    # Saved before there were several lines: the one line keeps its text, its ping and its armed state.
+    await db.set_guild_settings(1, {"rare_text": "{target} hi", "rare_target_id": 42, "rare_armed": True})
+    loaded = await SettingsStore(db).get(1)
+    assert loaded.rare_lines == (RareLine("{target} hi", 42),) and loaded.rare_armed == 0
+    saved = loaded.to_overrides()
+    assert "rare_text" not in saved and saved["rare_lines"] == [{"text": "{target} hi", "target_id": 42}]
+    assert GuildSettings.from_overrides(saved) == loaded
+
+
+async def test_rare_lines_roundtrip(db):
+    store = SettingsStore(db)
+    await store.update(1, rare_lines=[RareLine("a"), {"text": "b", "target_id": 7}, RareLine("   ")])
+    loaded = await SettingsStore(db).get(1)
+    assert loaded.rare_lines == (RareLine("a"), RareLine("b", 7))  # blank lines are dropped
 
 
 def test_channel_modes():
