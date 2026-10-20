@@ -465,6 +465,39 @@ async def test_failed_replacement_upload_edits_with_fresh_files(h, db, monkeypat
     file.close()
 
 
+def test_mixed_media():
+    def tweet_with(*kinds):
+        return {"media": {"all": [{"type": kind} for kind in kinds]}}
+
+    assert lf.mixed_media(tweet_with("photo", "video")) == ("photo", "video")
+    assert lf.mixed_media(tweet_with("gif", "photo", "photo")) == ("gif", "photo", "photo")
+    assert lf.mixed_media(tweet_with("photo", "photo")) == ()  # an image gallery works as it is
+    assert lf.mixed_media(tweet_with("video")) == ()
+    assert lf.mixed_media(None) == () and lf.mixed_media({}) == ()
+
+
+MIXED = {"lang": "en", "text": "art and animation", "media": {"all": [{"type": "photo"}, {"type": "video"}]}}
+
+
+async def test_mixed_media_tweet_gets_one_preview_per_item(h, db):
+    h.tweet_info = MIXED
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1"))
+    (content, _), = h.sent
+    assert "[FxTwitter](https://fxtwitter.com/twitter:1/photo/1)" in content
+    assert "[video](https://fxtwitter.com/twitter:1/video/2)" in content
+    (row,) = await db.get_reposts_for_origin(500)
+    assert row.media == "photo,video" and row.status == "ok"
+
+
+async def test_mixed_media_survives_a_fixer_switch(h, db):
+    h.tweet_info = MIXED
+    h.embed_script = [[], [text_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1"))
+    content = h.sends[1]["content"]
+    assert "vxtwitter.com/twitter:1/photo/1" in content and "vxtwitter.com/twitter:1/video/2" in content
+
+
 async def test_down_fixers_go_last(h, db):
     h.bot.down_fixers.add("fxtwitter")
     h.embed_script = [[text_embed().to_dict()]]
@@ -1111,17 +1144,6 @@ async def test_paused_bb_does_nothing(h, db):
     await h.quiet(paused=True)
     await h.cog.process(message("https://x.com/a/status/1"))
     assert h.sent == [] and await db.post_keys_for_message(500) == set()
-
-
-async def test_burst_brake_stops_a_flood(h, db):
-    from bb.brake import BurstBrake
-
-    h.cog.brake = BurstBrake(per_channel=2, per_server=40, clock=lambda: 0.0)
-    h.embed_script = [[text_embed().to_dict()]] * 4
-    for n in range(1, 5):
-        await h.cog.process(message(f"https://x.com/a/status/{n}", mid=400 + n))
-    assert len(h.sent) == 2  # the third and fourth were held back
-
 
 
 @pytest.mark.parametrize(

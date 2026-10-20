@@ -25,7 +25,6 @@ import discord
 from discord.ext import commands
 
 from bb import ehentai, nhentai, render, rerun, strings, upload, views
-from bb.brake import BurstBrake
 from bb.cards import Cover
 from bb.db import PostRow, RepostRow
 from bb.links import extract, resolve, sites
@@ -178,6 +177,18 @@ FIND_SOURCE_SITES = frozenset({"reddit", "bluesky", "instagram"})
 NO_TEXT_LANGS = frozenset({"zxx", "und", "qme", "qam", "qct", "qht", "qst"})
 
 
+def mixed_media(tweet: dict[str, Any] | None) -> tuple[str, ...]:
+    """The tweet's media kinds when it mixes photos with videos or GIFs, else (). Those need one preview
+    per item: Discord folds same-URL previews into an image gallery, where the video can't play."""
+    if not tweet:
+        return ()
+    items = (tweet.get("media") or {}).get("all") or []
+    kinds = tuple(str(item.get("type")) for item in items if isinstance(item, dict))
+    if "photo" in kinds and any(kind in ("video", "gif") for kind in kinds):
+        return kinds[:4]
+    return ()
+
+
 def translate_offered(tweet: dict[str, Any] | None, target: str) -> bool:
     """Translate for tweets in another language; if FxTwitter didn't answer, offer it anyway."""
     return True if tweet is None else offer_translation(tweet.get("lang"), target, tweet.get("text"))
@@ -302,6 +313,7 @@ class LiveRepost:
     origin: Any = None
     settings: GuildSettings | None = None
     view: Any = None
+    media: tuple[str, ...] = ()  # a mixed tweet's media kinds: one preview per item
 
 
 # Attachments are rebuilt for every send attempt: discord.py closes a File once a send ends, even a
@@ -363,7 +375,6 @@ class LinkFix(commands.Cog):
         self.embed_timeout = EMBED_TIMEOUT
         self.rescue_timeout = RESCUE_TIMEOUT
         self._rare_lock = asyncio.Lock()
-        self.brake = BurstBrake()
         self.resuppress_delay = RESUPPRESS_DELAY
         self._locks: dict[int, asyncio.Lock] = {}
         self._lock_users: dict[int, int] = {}
@@ -778,13 +789,12 @@ class LinkFix(commands.Cog):
     ) -> LiveRepost | None:
         guild = message.guild
         assert guild is not None
-        if not self.brake.allow(guild.id, message.channel.id):
-            return None
         tweet = await self._tweet_info(m) if m.site.id == "twitter" else None
         fixers = list(sites.chain(m.site.id, self.bot.down_fixers))
         first = fixers[0] if fixers else None
+        media = mixed_media(tweet)
         if first is not None:
-            content = render.format_repost(m, first.name, sites.fixed_url(m, first), quip)
+            content = render.repost_text(m, first, quip, media=media)
         else:
             content = render.format_upload(m, quip)
         view = views.make_repost_view(
@@ -812,11 +822,12 @@ class LinkFix(commands.Cog):
             quip=quip,
             via_webhook=sent.webhook is not None,
             webhook_id=sent.webhook.id if sent.webhook is not None else None,
+            media=",".join(media),
         )
         await self.bot.db.insert_repost(row)
         repost = LiveRepost(
             row=row, match=m, chain=fixers, sent=sent, is_rerun=is_rerun, max_bytes=guild.filesize_limit,
-            origin=message, settings=settings, view=view,
+            origin=message, settings=settings, view=view, media=media,
         )
         if message.id in self._deleted_origins:
             await self._drop(repost)
@@ -841,7 +852,7 @@ class LinkFix(commands.Cog):
                 return "gone"
             if index > 0:
                 self._recent_embeds.pop(row.repost_id, None)
-                content = render.format_repost(m, fixer.name, sites.fixed_url(m, fixer), row.quip)
+                content = render.repost_text(m, fixer, row.quip, media=repost.media)
                 row.fixer_id = fixer.id
                 edited = await self._replace(repost, content=content)
                 await db.update_repost(row.repost_id, fixer_id=fixer.id)
@@ -988,8 +999,6 @@ class LinkFix(commands.Cog):
             quip = await self._choose_quip(
                 message, settings, rerun_line=rerun_line, site_name=source.SITE.name, channel_id=quip_channel
             )
-            if not self.brake.allow(guild.id, message.channel.id):
-                continue
             view = source.build_card(meta, gallery, cover=cover, quip=quip)
             try:
                 sent = await self._send_card(message, settings, view, cover, quip=quip)

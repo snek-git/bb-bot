@@ -35,6 +35,7 @@ class Config:
     dev_guild_id: int | None = None
     log_level: str = "INFO"
     link_style: str = "hidden"  # "hidden" (just the preview) or "subtle" (small "@user on Twitter" line)
+    heartbeat_url: str | None = None  # an uptime check (e.g. healthchecks.io) BB pings while connected
     # Placeholder name used in strings.yaml (e.g. "bb_smug") -> Discord emoji markup.
     emojis: dict[str, str] = field(default_factory=dict)
 
@@ -56,5 +57,6 @@ class Config:
             dev_guild_id=_optional_int(env.get("DEV_GUILD_ID")),
             log_level=(env.get("LOG_LEVEL") or "INFO").upper(),
             link_style=(env.get("LINK_STYLE") or "hidden").strip().lower(),
+            heartbeat_url=(env.get("HEARTBEAT_URL") or "").strip() or None,
             emojis=emojis,
         )

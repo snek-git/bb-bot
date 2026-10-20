@@ -56,8 +56,9 @@ def translated_text(
     if fixer is None:
         raise LookupError(f"repost {row.repost_id}: no usable fixer")
     quip = row.quip
-    url = sites.fixed_url(match, fixer, lang=lang if translate else None)
-    return render.format_repost(match, fixer.name, url, quip=quip), fixer, quip
+    media = tuple(kind for kind in row.media.split(",") if kind)  # a mixed tweet keeps one preview per item
+    text = render.repost_text(match, fixer, quip, media=media, lang=lang if translate else None)
+    return text, fixer, quip
 
 
 def _thread_of(channel: Any) -> Any:

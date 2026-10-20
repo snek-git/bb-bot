@@ -52,7 +52,8 @@ CREATE TABLE IF NOT EXISTS reposts (
     webhook_id        INTEGER,
     translated        INTEGER NOT NULL DEFAULT 0,
     status            TEXT    NOT NULL DEFAULT 'pending',  -- pending | ok | uploaded | failed
-    created_at        REAL    NOT NULL
+    created_at        REAL    NOT NULL,
+    media             TEXT    NOT NULL DEFAULT ''  -- "photo,video": a mixed tweet, one preview per item
 );
 CREATE INDEX IF NOT EXISTS reposts_by_origin ON reposts (origin_message_id);
 CREATE INDEX IF NOT EXISTS reposts_by_time ON reposts (created_at);
@@ -79,8 +80,10 @@ CREATE TABLE IF NOT EXISTS fixer_health (
 
 # Bump SCHEMA_VERSION with every schema change: put the change in SCHEMA (new databases) and the
 # step that takes an existing database there in MIGRATIONS[new version].
-SCHEMA_VERSION = 1
-MIGRATIONS: dict[int, str] = {}
+SCHEMA_VERSION = 2
+MIGRATIONS: dict[int, str] = {
+    2: "ALTER TABLE reposts ADD COLUMN media TEXT NOT NULL DEFAULT '';",
+}
 
 
 @dataclass
@@ -114,6 +117,7 @@ class RepostRow:
     translated: bool = False
     status: str = "pending"
     created_at: float = 0.0
+    media: str = ""  # comma-separated kinds of a tweet that mixes photos and videos, else ""
 
 
 @dataclass
