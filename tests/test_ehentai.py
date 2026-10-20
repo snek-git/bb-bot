@@ -126,10 +126,10 @@ async def test_fetch_cover_follows_the_pages_and_caches(monkeypatch):
     monkeypatch.setattr(ehentai, "_get_image", get_image)
     monkeypatch.setattr(ehentai, "_cover_cache", {})
     gallery = ehentai.find_galleries(G1)[0]
-    cover = await ehentai.fetch_cover(None, gallery, 10_000_000)
+    cover = await ehentai.fetch_cover(None, gallery, meta(), 10_000_000)
     assert cover == ehentai.Cover(b"webpdata", "cover.webp")
     assert calls == [G1, "https://e-hentai.org/s/ef945ea8e7/618395-1", "https://n.hath.network/i.webp"]
-    assert await ehentai.fetch_cover(None, gallery, 10_000_000) == cover
+    assert await ehentai.fetch_cover(None, gallery, meta(), 10_000_000) == cover
     assert len(calls) == 3  # second time from the cache
 
 
@@ -139,7 +139,7 @@ async def test_fetch_cover_gives_up_quietly(monkeypatch):
 
     monkeypatch.setattr(ehentai, "_get_text", get_text)
     monkeypatch.setattr(ehentai, "_cover_cache", {})
-    assert await ehentai.fetch_cover(None, ehentai.find_galleries(G1)[0], 10_000_000) is None
+    assert await ehentai.fetch_cover(None, ehentai.find_galleries(G1)[0], meta(), 10_000_000) is None
 
 
 def test_exhentai_links_stay_on_exhentai():

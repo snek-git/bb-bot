@@ -832,11 +832,12 @@ def cards(h, monkeypatch):
         sent.append((view, cover))
         return SimpleNamespace(id=next(h.ids))
 
-    async def no_cover(session, gallery, max_bytes):
+    async def no_cover(session, gallery, meta, max_bytes):
         return None
 
     h.cog._send_card = send_card
     monkeypatch.setattr(lf.ehentai, "fetch_cover", no_cover)
+    monkeypatch.setattr(lf.nhentai, "fetch_cover", no_cover)
     return sent
 
 
@@ -877,6 +878,83 @@ async def test_cards_can_be_turned_off(h, db, cards, monkeypatch):
     await h.quiet(sites_enabled={**GuildSettings().sites_enabled, "ehentai": False})
     await h.cog.process(message(EH))
     assert cards == []
+
+
+NH = "https://nhentai.net/g/450000/"
+
+
+def nh_meta(tags=({"type": "parody", "name": "touhou project"},)):
+    meta = {"id": 450000, "title": {"english": "T", "pretty": "T"}, "num_pages": 3, "tags": list(tags)}
+    return {450000: meta}
+
+
+@pytest.fixture
+def nh_fetch(monkeypatch):
+    calls = []
+
+    async def fetch(session, galleries):
+        calls.append([g.gid for g in galleries])
+        return nh_meta()
+
+    monkeypatch.setattr(lf.nhentai, "fetch_metadata", fetch)
+    return calls
+
+
+async def test_nhentai_link_gets_a_card(h, db, cards, nh_fetch):
+    await h.cog.process(message(f"look {NH}"))
+    ((view, cover),) = cards
+    assert cover is None
+    (container,) = view.children
+    assert container.children[-1].children[0].url == NH
+    assert await db.post_keys_for_message(500) == {"nhentai:450000"}
+    (row,) = await db.get_reposts_for_origin(500)
+    assert (row.site, row.status, row.original_url) == ("nhentai", "ok", NH)
+    assert h.original == [(500, "suppress")]
+
+
+async def test_both_gallery_sites_in_one_message(h, db, cards, nh_fetch, monkeypatch):
+    async def fetch(session, galleries):
+        return eh_meta()
+
+    monkeypatch.setattr(lf.ehentai, "fetch_metadata", fetch)
+    await h.cog.process(message(f"{EH} {NH}"))
+    assert len(cards) == 2
+    assert await db.post_keys_for_message(500) == {"ehentai:618395", "nhentai:450000"}
+
+
+async def test_editing_a_message_keeps_its_nhentai_card(h, db, cards, nh_fetch):
+    await h.cog.process(message(NH))
+    await h.cog.process(message(f"{NH} (edited: typo)"), edit=True)
+    assert h.deleted == []  # the card isn't a fixed link, so the edit diff must leave it alone
+    assert [r.canonical_key for r in await db.get_reposts_for_origin(500)] == ["nhentai:450000"]
+    assert nh_fetch == [[450000]]  # and edits don't post a second card
+
+
+async def test_blocked_nhentai_gallery_gets_nothing(h, db, cards, monkeypatch):
+    async def fetch(session, galleries):
+        return nh_meta(tags=[{"type": "tag", "name": "lolicon"}])
+
+    monkeypatch.setattr(lf.nhentai, "fetch_metadata", fetch)
+    await h.cog.process(message(NH))
+    assert cards == []
+    assert await db.post_keys_for_message(500) == set()  # not even a record
+    assert h.original == []
+
+
+async def test_nhentai_cards_can_be_turned_off_alone(h, db, cards, nh_fetch, monkeypatch):
+    async def fetch(session, galleries):
+        return eh_meta()
+
+    monkeypatch.setattr(lf.ehentai, "fetch_metadata", fetch)
+    await h.quiet(sites_enabled={**GuildSettings().sites_enabled, "nhentai": False})
+    await h.cog.process(message(f"{EH} {NH}"))
+    assert nh_fetch == []  # never even asked the API
+    assert await db.post_keys_for_message(500) == {"ehentai:618395"}
+
+
+def test_card_keys():
+    assert lf.is_card_key("nhentai:450000") and lf.is_card_key("ehentai:618395")
+    assert not lf.is_card_key("twitter:1") and not lf.is_card_key("bsky:a.bsky.social/3abc")
 
 
 # --- the rare custom line ----------------------------------------------------------------

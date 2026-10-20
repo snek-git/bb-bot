@@ -15,7 +15,7 @@ from typing import Any
 import discord
 from discord.ext import commands, tasks
 
-from bb import ehentai, render, strings
+from bb import ehentai, nhentai, render, strings
 from bb.links import sites
 from bb.timeutil import now, zone
 
@@ -49,8 +49,11 @@ def roundup_due(ts: float, tz: str, weekday: int, hour: int, last_sent: float) -
     return last_sent < slot and ts - slot < GRACE and ts - last_sent >= MIN_GAP
 
 
+_CARD_SITES = {source.SITE_ID: source.SITE for source in (ehentai, nhentai)}
+
+
 def site_name(site_id: str) -> str:
-    site = sites.SITES.get(site_id) or (ehentai.SITE if site_id == ehentai.SITE_ID else None)
+    site = sites.SITES.get(site_id) or _CARD_SITES.get(site_id)
     return site.name if site else site_id
 
 

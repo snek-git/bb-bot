@@ -30,6 +30,7 @@ def _optional_int(value: str | None) -> int | None:
 class Config:
     token: str | None = None
     saucenao_key: str | None = None
+    nhentai_key: str | None = None
     db_path: str = "data/bb.sqlite"
     dev_guild_id: int | None = None
     log_level: str = "INFO"
@@ -50,6 +51,7 @@ class Config:
         return cls(
             token=env.get("DISCORD_TOKEN") or None,
             saucenao_key=env.get("SAUCENAO_API_KEY") or None,
+            nhentai_key=env.get("NHENTAI_API_KEY") or None,
             db_path=env.get("DATABASE_PATH") or "data/bb.sqlite",
             dev_guild_id=_optional_int(env.get("DEV_GUILD_ID")),
             log_level=(env.get("LOG_LEVEL") or "INFO").upper(),
