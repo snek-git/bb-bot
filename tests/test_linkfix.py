@@ -22,8 +22,8 @@ from bb.links.model import Fixer, LinkMatch, Site
 from bb.settings_store import GuildSettings, RareLine, SettingsStore
 
 G, CH = 1, 10
-FX = Fixer("fxtwitter", "FxTwitter", "fxtwitter.com", translatable=True)
-VX = Fixer("vxtwitter", "vxTwitter", "vxtwitter.com")
+FX = Fixer("fxtwitter", "FxTwitter", "fxtwitter.com", translatable=True, direct_domain="d.fxtwitter.com")
+VX = Fixer("vxtwitter", "vxTwitter", "vxtwitter.com", direct_domain="d.vxtwitter.com")
 TWITTER = Site("twitter", "Twitter", "Tweet", (FX, VX), "https://x.com/a/status/1")
 PIXIV_FX = Fixer("phixiv", "phixiv", "phixiv.net")
 PIXIV = Site("pixiv", "Pixiv", "Pixiv", (PIXIV_FX,), "https://www.pixiv.net/artworks/1")
@@ -484,8 +484,8 @@ async def test_mixed_media_tweet_gets_one_preview_per_item(h, db):
     h.embed_script = [[text_embed().to_dict()]]
     await h.cog.process(message("https://x.com/a/status/1"))
     (content, _), = h.sent
-    assert "[FxTwitter](https://fxtwitter.com/twitter:1/photo/1)" in content
-    assert "[video](https://fxtwitter.com/twitter:1/video/2)" in content
+    assert "[FxTwitter](https://fxtwitter.com/twitter:1/photo/1)" in content  # the card, with the text
+    assert "[video](https://d.fxtwitter.com/twitter:1/video/2)" in content  # just the video: no text twice
     (row,) = await db.get_reposts_for_origin(500)
     assert row.media == "photo,video" and row.status == "ok"
 
@@ -495,7 +495,8 @@ async def test_mixed_media_survives_a_fixer_switch(h, db):
     h.embed_script = [[], [text_embed().to_dict()]]
     await h.cog.process(message("https://x.com/a/status/1"))
     content = h.sends[1]["content"]
-    assert "vxtwitter.com/twitter:1/photo/1" in content and "vxtwitter.com/twitter:1/video/2" in content
+    assert "(https://vxtwitter.com/twitter:1/photo/1)" in content
+    assert "(https://d.vxtwitter.com/twitter:1/video/2)" in content
 
 
 async def test_down_fixers_go_last(h, db):

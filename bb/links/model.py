@@ -13,6 +13,9 @@ class Fixer:
     name: str  # shown in the repost line, e.g. "FxTwitter"
     domain: str  # e.g. "fxtwitter.com"
     translatable: bool = False  # supports the "/<lang>" translation suffix
+    # Serves a post's media alone, without the text card (e.g. "d.fxtwitter.com"). Used for the extra
+    # items of a mixed photo+video tweet, so the tweet's text shows once.
+    direct_domain: str | None = None
 
 
 @dataclass(frozen=True)

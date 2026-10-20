@@ -97,9 +97,13 @@ SITES: dict[str, Site] = {
         name="Twitter",
         label="Tweet",
         fixers=(
-            Fixer("fxtwitter", "FxTwitter", "fxtwitter.com", translatable=True),
-            Fixer("vxtwitter", "vxTwitter", "vxtwitter.com", translatable=True),
-            Fixer("fixupx", "FixupX", "fixupx.com", translatable=True),
+            Fixer(
+                "fxtwitter", "FxTwitter", "fxtwitter.com", translatable=True, direct_domain="d.fxtwitter.com"
+            ),
+            Fixer(
+                "vxtwitter", "vxTwitter", "vxtwitter.com", translatable=True, direct_domain="d.vxtwitter.com"
+            ),
+            Fixer("fixupx", "FixupX", "fixupx.com", translatable=True, direct_domain="d.fixupx.com"),
         ),
         test_url="https://x.com/BarackObama/status/266031293945503744",
     ),
@@ -463,13 +467,22 @@ def media_links(
 ) -> list[tuple[str, str]]:
     """(kind, fixer URL) for each link a repost needs. Normally one. A tweet mixing photos and videos gets
     one per item: Discord folds same-URL previews into one image gallery, where a video can't play, so
-    each item gets its own URL ("/photo/1", "/video/2"; every fixer picks the item by position)."""
-    base = fixed_url(m, fixer)
+    each item gets its own URL ("/photo/1", "/video/2"; every fixer picks the item by position). The
+    first is the full card with the tweet's text; the rest are the bare media (the fixer's direct
+    domain), so the text doesn't show twice."""
+    base = fixed_url(m, fixer).rstrip("/")
     if not media:
         return [("", fixed_url(m, fixer, lang=lang))]
+    direct = base
+    if fixer.direct_domain:
+        direct = base.replace(f"https://{fixer.domain}", f"https://{fixer.direct_domain}", 1)
     links = []
     for index, kind in enumerate(media[:4], 1):
-        url = f"{base.rstrip('/')}/{'photo' if kind == 'photo' else 'video'}/{index}"
+        item = f"/{'photo' if kind == 'photo' else 'video'}/{index}"
+        if index > 1:
+            links.append((kind, direct + item))  # media only: no text, so no translation either
+            continue
+        url = base + item
         if lang and fixer.translatable:
             code = lang.strip().lower().replace("_", "-")
             if _LANG_CODE.fullmatch(code):

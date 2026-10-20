@@ -359,7 +359,8 @@ def test_translating_a_mixed_tweet_keeps_one_preview_per_item():
     row = make_row(original_url="https://x.com/bb/status/1", media="photo,video")
     text, fixer, _ = buttons.translated_text(row, True, "en", set())
     assert fixer.id == "fxtwitter"
-    assert "/status/1/photo/1/en)" in text and "[video](https://fxtwitter.com/bb/status/1/video/2/en)" in text
+    assert "(https://fxtwitter.com/bb/status/1/photo/1/en)" in text  # the card gets translated
+    assert "[video](https://d.fxtwitter.com/bb/status/1/video/2)" in text  # the bare video has no text
 
 
 def test_translated_text_flips_and_back(fake_sites):
