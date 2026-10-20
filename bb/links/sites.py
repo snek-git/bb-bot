@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import re
 import time
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Sequence
 from urllib.parse import parse_qs, urlsplit
 
 from bb.links.model import Fixer, LinkMatch, Site
@@ -456,6 +456,26 @@ def fixed_url(m: LinkMatch, fixer: Fixer, lang: str | None = None) -> str:
         if _LANG_CODE.fullmatch(code):
             url = f"{url.rstrip('/')}/{code}"
     return url
+
+
+def media_links(
+    m: LinkMatch, fixer: Fixer, media: Sequence[str] = (), lang: str | None = None
+) -> list[tuple[str, str]]:
+    """(kind, fixer URL) for each link a repost needs. Normally one. A tweet mixing photos and videos gets
+    one per item: Discord folds same-URL previews into one image gallery, where a video can't play, so
+    each item gets its own URL ("/photo/1", "/video/2"; every fixer picks the item by position)."""
+    base = fixed_url(m, fixer)
+    if not media:
+        return [("", fixed_url(m, fixer, lang=lang))]
+    links = []
+    for index, kind in enumerate(media[:4], 1):
+        url = f"{base.rstrip('/')}/{'photo' if kind == 'photo' else 'video'}/{index}"
+        if lang and fixer.translatable:
+            code = lang.strip().lower().replace("_", "-")
+            if _LANG_CODE.fullmatch(code):
+                url = f"{url}/{code}"
+        links.append((kind, url))
+    return links
 
 
 def get_fixer(fixer_id: str) -> Fixer | None:

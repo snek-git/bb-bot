@@ -236,3 +236,46 @@ def test_all_probes_failing_means_bb_is_offline():
     assert looks_offline({"a": False, "b": False, "c": False})
     assert not looks_offline({"a": False, "b": True, "c": False})
     assert not looks_offline({"a": False})  # too few probes to tell
+
+
+# --- uptime heartbeat --------------------------------------------------------------------------
+
+
+class _Resp:
+    def __init__(self, status):
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+
+def _heartbeat_bot(url, *, ready=True, status=200):
+    calls = []
+
+    def get(u, timeout=None):
+        calls.append(u)
+        return _Resp(status)
+
+    bot = SimpleNamespace(
+        config=SimpleNamespace(heartbeat_url=url),
+        is_ready=lambda: ready,
+        is_closed=lambda: False,
+        http_client=SimpleNamespace(get=get),
+    )
+    return bot, calls
+
+
+async def test_heartbeat_pings_only_while_connected():
+    from bb.cogs.heartbeat import Heartbeat
+
+    bot, calls = _heartbeat_bot("https://hc-ping.com/abc")
+    assert await Heartbeat(bot).beat() is True and calls == ["https://hc-ping.com/abc"]
+    offline, calls = _heartbeat_bot("https://hc-ping.com/abc", ready=False)
+    assert await Heartbeat(offline).beat() is False and calls == []  # silence is the alarm
+    unset, calls = _heartbeat_bot(None)
+    assert await Heartbeat(unset).beat() is False and calls == []
+    refused, calls = _heartbeat_bot("https://hc-ping.com/abc", status=404)
+    assert await Heartbeat(refused).beat() is False

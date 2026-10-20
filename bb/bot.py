@@ -25,6 +25,7 @@ EXTENSIONS = (
     "bb.cogs.health",  # D
     "bb.cogs.status",  # D
     "bb.cogs.roundup",  # D
+    "bb.cogs.heartbeat",
 )
 
 USER_AGENT = "BB-bot (+https://github.com/; Discord link fixer)"

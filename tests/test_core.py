@@ -170,24 +170,51 @@ async def test_migrations_run_in_order(tmp_path, monkeypatch):
     first = Database(path)
     await first.connect()
     await first.close()
-    monkeypatch.setattr(dbmod, "SCHEMA_VERSION", 2)
-    monkeypatch.setattr(dbmod, "MIGRATIONS", {2: "ALTER TABLE posts ADD COLUMN note TEXT;"})
+    nxt = dbmod.SCHEMA_VERSION + 1
+    monkeypatch.setattr(dbmod, "SCHEMA_VERSION", nxt)
+    steps = {**dbmod.MIGRATIONS, nxt: "ALTER TABLE posts ADD COLUMN note TEXT;"}
+    monkeypatch.setattr(dbmod, "MIGRATIONS", steps)
     second = Database(path)
     await second.connect()
-    assert await _user_version(second) == 2
+    assert await _user_version(second) == nxt
     async with second.conn.execute("PRAGMA table_info(posts)") as cursor:
         assert "note" in {row[1] for row in await cursor.fetchall()}
     await second.close()
 
 
-async def test_new_database_starts_at_the_latest_version_without_migrating(tmp_path, monkeypatch):
-    # SCHEMA already has the latest shape: replaying ALTERs on top of it would break a new install.
-    monkeypatch.setattr(dbmod, "SCHEMA_VERSION", 2)
-    monkeypatch.setattr(dbmod, "MIGRATIONS", {2: "ALTER TABLE posts ADD COLUMN created_at REAL;"})
+async def test_new_database_starts_at_the_latest_version_without_migrating(tmp_path):
+    # SCHEMA already has the latest shape: replaying the ALTERs on top of it would break a new install.
     database = Database(str(tmp_path / "bb.db"))
-    await database.connect()  # would fail with "duplicate column" if the step ran
-    assert await _user_version(database) == 2
+    await database.connect()  # would fail with "duplicate column" if a step ran
+    assert await _user_version(database) == dbmod.SCHEMA_VERSION
     await database.close()
+
+
+def _as_version_one(path, user_version):
+    """A database as BB left it before the media column existed (schema version 1, or unversioned)."""
+    with sqlite3.connect(path) as conn:
+        conn.execute("ALTER TABLE reposts DROP COLUMN media")
+        conn.execute(f"PRAGMA user_version = {user_version}")
+    conn.close()
+
+
+async def test_version_one_database_gets_the_media_column(tmp_path):
+    # production's path on the deploy that adds mixed-media support: old rows stay, with media ""
+    path = tmp_path / "bb.db"
+    first = Database(str(path))
+    await first.connect()
+    await first.insert_repost(RepostRow(
+        repost_id=1, guild_id=1, channel_id=2, origin_message_id=3, origin_author_id=4,
+        site="twitter", canonical_key="twitter:5", original_url="https://x.com/a/status/5",
+    ))
+    await first.close()
+    _as_version_one(path, 1)
+    second = Database(str(path))
+    await second.connect()
+    assert await _user_version(second) == 2
+    row = await second.get_repost(1)
+    assert row is not None and row.media == "" and row.canonical_key == "twitter:5"
+    await second.close()
 
 
 async def test_unversioned_database_counts_as_version_one(tmp_path):
@@ -195,12 +222,10 @@ async def test_unversioned_database_counts_as_version_one(tmp_path):
     first = Database(str(path))
     await first.connect()
     await first.close()
-    with sqlite3.connect(path) as conn:
-        conn.execute("PRAGMA user_version = 0")  # made before versioning existed
-    conn.close()
+    _as_version_one(path, 0)  # made before versioning existed: that's the version 1 shape
     second = Database(str(path))
     await second.connect()
-    assert await _user_version(second) == 1
+    assert await _user_version(second) == dbmod.SCHEMA_VERSION  # upgraded from 1 like any old database
     await second.close()
 
 

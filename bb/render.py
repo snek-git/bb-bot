@@ -11,10 +11,11 @@ Two styles, chosen once at startup with LINK_STYLE in .env:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal
 
 from bb.links import sites
-from bb.links.model import LinkMatch
+from bb.links.model import Fixer, LinkMatch
 
 Style = Literal["hidden", "subtle"]
 STYLES: tuple[Style, ...] = ("hidden", "subtle")
@@ -59,16 +60,38 @@ def _head(m: LinkMatch, quip: str | None) -> str:
 
 
 def format_repost(
-    m: LinkMatch, fixer_name: str, fixed: str, quip: str | None = None, style: Style | None = None
+    m: LinkMatch,
+    fixer_name: str,
+    fixed: str,
+    quip: str | None = None,
+    style: Style | None = None,
+    *,
+    more: Sequence[tuple[str, str]] = (),
 ) -> str:
-    """The repost text: a link to the fixer URL (the only previewed link) plus the quip, if any."""
+    """The repost text: a link to the fixer URL (previewed) plus the quip, if any. more: extra
+    (label, URL) previews for a tweet that mixes photos and videos, one per item."""
+    extra = [_spoiler(f"[{label}]({md_url(url)})", m.spoiler) for label, url in more]
     fixed = md_url(fixed)
     if (style or _style) == "subtle":
         link = _spoiler(f"[{_who(m)}]({fixed})", m.spoiler)
-        return f"-# {link}{SEPARATOR}{quip}" if quip else f"-# {link}"
+        return "-# " + SEPARATOR.join([link, *extra, *([quip] if quip else [])])
     source = f"[{m.site.label}](<{md_url(sites.source_url(m))}>)"
     link = _spoiler(f"[{fixer_name}]({fixed})", m.spoiler)
-    return "-# " + SEPARATOR.join([source, link, *([quip] if quip else [])])
+    return "-# " + SEPARATOR.join([source, link, *extra, *([quip] if quip else [])])
+
+
+def repost_text(
+    m: LinkMatch,
+    fixer: Fixer,
+    quip: str | None = None,
+    *,
+    media: Sequence[str] = (),
+    lang: str | None = None,
+    style: Style | None = None,
+) -> str:
+    """format_repost for a fixer, with one preview per item when the tweet mixes photos and videos."""
+    (_, first), *rest = sites.media_links(m, fixer, media, lang)
+    return format_repost(m, fixer.name, first, quip, style, more=rest)
 
 
 def format_upload(m: LinkMatch, quip: str | None = None, style: Style | None = None) -> str:

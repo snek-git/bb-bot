@@ -355,6 +355,13 @@ async def test_failed_delete_keeps_the_row(db):
 # --- translate --------------------------------------------------------------------------
 
 
+def test_translating_a_mixed_tweet_keeps_one_preview_per_item():
+    row = make_row(original_url="https://x.com/bb/status/1", media="photo,video")
+    text, fixer, _ = buttons.translated_text(row, True, "en", set())
+    assert fixer.id == "fxtwitter"
+    assert "/status/1/photo/1/en)" in text and "[video](https://fxtwitter.com/bb/status/1/video/2/en)" in text
+
+
 def test_translated_text_flips_and_back(fake_sites):
     text, fixer, quip = buttons.translated_text(make_row(), True, "en", set())
     assert fixer is FX
