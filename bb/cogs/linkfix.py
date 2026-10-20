@@ -24,7 +24,8 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from bb import ehentai, render, rerun, strings, upload, views
+from bb import ehentai, nhentai, render, rerun, strings, upload, views
+from bb.cards import Cover
 from bb.db import PostRow, RepostRow
 from bb.links import extract, resolve, sites
 from bb.links.model import Fixer, LinkMatch
@@ -50,11 +51,19 @@ RESUPPRESS_DELAY = 1.0
 WEBHOOK_NAME = "BB"
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 SETTLED_OK = ("ok", "uploaded")
+# Sites no fixer covers, where BB builds her own gallery card. Each module has the same surface:
+# SITE_ID, SITE, find_galleries, fetch_metadata, is_blocked, fetch_cover and build_card.
+CARD_SOURCES = (ehentai, nhentai)
+CARD_SITE_IDS = frozenset(source.SITE_ID for source in CARD_SOURCES)
 
 OriginalAction = Literal["suppress", "delete", "nothing"]
 
 
 # --- pure decisions --------------------------------------------------------------------------
+
+
+def is_card_key(canonical_key: str) -> bool:
+    return canonical_key.partition(":")[0] in CARD_SITE_IDS
 
 
 def is_skipped(content: str, skip_word: str) -> bool:
@@ -455,10 +464,10 @@ class LinkFix(commands.Cog):
                 matches: list[LinkMatch] = []
             else:
                 matches = await collect_matches(message.content, settings, self.bot.http_session)
-                if not edit and settings.site_enabled(ehentai.SITE_ID):
+                if not edit:
                     cards = await self._post_cards(message, settings)
             # Cards aren't edit-synced: an edit that doesn't touch the gallery link shouldn't drop its card.
-            link_keys = {key for key in old_keys if not key.startswith(f"{ehentai.SITE_ID}:")}
+            link_keys = {key for key in old_keys if not is_card_key(key)}
             removed, added = diff_keys(link_keys, matches)
             ts = now()
             if added and edit and is_history(message.created_at.timestamp(), ts) and not edited_recently(
@@ -472,7 +481,7 @@ class LinkFix(commands.Cog):
                 await self._remove_link(message.id, key)
             if not added:
                 if cards and message.id not in self._deleted_origins:
-                    # Only cards: the original's own (bare) e-hentai preview goes, like a fixed link's would.
+                    # Only cards: the original's own (bare) gallery preview goes, like a fixed link's would.
                     action = original_action(
                         settings.original_action,
                         ["ok"] * cards,
@@ -942,31 +951,38 @@ class LinkFix(commands.Cog):
 
     # --- Discord I/O ----------------------------------------------------------------------
 
-    # --- e-hentai cards -------------------------------------------------------------------
+    # --- gallery cards (e-hentai, nhentai) ------------------------------------------------
 
     async def _post_cards(self, message: discord.Message, settings: GuildSettings) -> int:
-        """BB's own card for each e-hentai gallery link (blocked tags: nothing at all, not even a record).
+        """BB's own card for each gallery link on a card site that's turned on (blocked tags: nothing at
+        all, not even a record). Returns how many cards were posted."""
+        posted = 0
+        for source in CARD_SOURCES:
+            if settings.site_enabled(source.SITE_ID):
+                posted += await self._post_source_cards(message, settings, source)
+        return posted
 
-        Returns how many cards were posted."""
-        galleries = ehentai.find_galleries(message.content)
+    async def _post_source_cards(self, message: discord.Message, settings: GuildSettings, source: Any) -> int:
+        galleries = source.find_galleries(message.content)
         if not galleries:
             return 0
         posted = 0
-        metas = await ehentai.fetch_metadata(self.bot.http_client, galleries)
+        metas = await source.fetch_metadata(self.bot.http_client, galleries)
         guild = message.guild
         assert guild is not None
         quip_channel = _parent_id(message.channel) or message.channel.id
-        kept: list[tuple[ehentai.Gallery, dict[str, Any]]] = []
+        kept: list[tuple[Any, dict[str, Any]]] = []
         for gallery in galleries:
             meta = metas.get(gallery.gid)
             if meta is None:
                 continue
-            if ehentai.is_blocked(meta):
-                log.info("skipped gallery %s on message %s: blocked tag", gallery.gid, message.id)
+            if source.is_blocked(meta):
+                what = f"{source.SITE_ID} gallery {gallery.gid}"
+                log.info("skipped %s on message %s: blocked tag", what, message.id)
                 continue
             kept.append((gallery, meta))
         covers = await asyncio.gather(
-            *(ehentai.fetch_cover(self.bot.http_client, g, guild.filesize_limit) for g, _ in kept)
+            *(source.fetch_cover(self.bot.http_client, g, meta, guild.filesize_limit) for g, meta in kept)
         )
         for (gallery, meta), cover in zip(kept, covers, strict=True):
             m = gallery.as_match()
@@ -977,17 +993,17 @@ class LinkFix(commands.Cog):
                 message_id=message.id,
                 author_id=message.author.id,
                 author_name=message.author.display_name,
-                site=ehentai.SITE_ID,
+                site=source.SITE_ID,
                 canonical_key=m.canonical_key,
             )
             quip = await self._choose_quip(
-                message, settings, rerun_line=rerun_line, site_name=ehentai.SITE.name, channel_id=quip_channel
+                message, settings, rerun_line=rerun_line, site_name=source.SITE.name, channel_id=quip_channel
             )
-            view = ehentai.build_card(meta, gallery, cover=cover, quip=quip)
+            view = source.build_card(meta, gallery, cover=cover, quip=quip)
             try:
                 sent = await self._send_card(message, settings, view, cover, quip=quip)
             except discord.HTTPException:
-                log.exception("couldn't post the card for gallery %s", gallery.gid)
+                log.exception("couldn't post the card for %s gallery %s", source.SITE_ID, gallery.gid)
                 continue
             await self.bot.db.insert_repost(
                 RepostRow(
@@ -996,7 +1012,7 @@ class LinkFix(commands.Cog):
                     channel_id=message.channel.id,
                     origin_message_id=message.id,
                     origin_author_id=message.author.id,
-                    site=ehentai.SITE_ID,
+                    site=source.SITE_ID,
                     canonical_key=m.canonical_key,
                     original_url=gallery.link,
                     spoiler=gallery.spoiler,
@@ -1012,7 +1028,7 @@ class LinkFix(commands.Cog):
         message: discord.Message,
         settings: GuildSettings,
         view: discord.ui.LayoutView,
-        cover: ehentai.Cover | None,
+        cover: Cover | None,
         *,
         quip: str | None = None,
     ) -> discord.Message:

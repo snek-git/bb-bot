@@ -8,7 +8,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from bb import render, strings, upload
+from bb import nhentai, render, strings, upload
 from bb.config import Config
 from bb.db import Database
 from bb.settings_store import SettingsStore
@@ -55,6 +55,7 @@ class BBBot(commands.Bot):
         self.http_session: aiohttp.ClientSession | None = None
         strings.set_emojis(config.emojis)
         render.set_style(config.link_style)
+        nhentai.set_api_key(config.nhentai_key)
 
     @property
     def http_client(self) -> aiohttp.ClientSession:

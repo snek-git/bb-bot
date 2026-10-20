@@ -17,9 +17,10 @@ from typing import Any
 import aiohttp
 import discord
 
+from bb import cards
+from bb.cards import Cover
 from bb.links import extract
 from bb.links.model import LinkMatch, Site
-from bb.render import BB_PURPLE
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +42,6 @@ SHOWN_NAMESPACES = (
     ("group", "Group"),
 )
 OTHER_NAMESPACES = ("female", "male", "mixed", "other")
-LINE_LIMIT = 300
 
 
 @dataclass(frozen=True)
@@ -126,19 +126,17 @@ async def fetch_metadata(
         return {}
 
 
-def _clip(text: str, limit: int = LINE_LIMIT) -> str:
-    return text if len(text) <= limit else text[: limit - 1].rstrip(", ") + "…"
-
-
 def tag_lines(tags: list[str]) -> list[str]:
     by_ns: dict[str, list[str]] = {}
     for tag in tags:
         ns, _, name = str(tag).rpartition(":")
         by_ns.setdefault(ns or "other", []).append(name)
-    lines = [f"**{label}:** {_clip(', '.join(by_ns[ns]))}" for ns, label in SHOWN_NAMESPACES if by_ns.get(ns)]
+    lines = [
+        f"**{label}:** {cards.clip(', '.join(by_ns[ns]))}" for ns, label in SHOWN_NAMESPACES if by_ns.get(ns)
+    ]
     rest = [name for ns in OTHER_NAMESPACES for name in by_ns.get(ns, [])]
     if rest:
-        lines.append(f"**Tags:** {_clip(', '.join(rest))}")
+        lines.append(f"**Tags:** {cards.clip(', '.join(rest))}")
     return lines
 
 
@@ -154,15 +152,8 @@ BROWSER_HEADERS = {
 COVER_TIMEOUT = 20.0
 COVER_MAX_BYTES = 8 * 1024 * 1024
 _IMG = re.compile(r'<img id="img" src="([^"]+)"')
-_EXT = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp", "image/gif": "gif"}
 _cover_cache: dict[int, tuple[bytes, str]] = {}
 _CACHE_SIZE = 16
-
-
-@dataclass(frozen=True)
-class Cover:
-    data: bytes
-    filename: str
 
 
 def first_page_url(gallery_html: str, gid: int) -> str | None:
@@ -182,21 +173,16 @@ async def _get_text(session: aiohttp.ClientSession, url: str) -> str | None:
 
 async def _get_image(session: aiohttp.ClientSession, url: str, max_bytes: int) -> tuple[bytes, str] | None:
     async with session.get(url, headers={"User-Agent": BROWSER_HEADERS["User-Agent"]}) as resp:
-        ext = _EXT.get(resp.content_type)
-        if resp.status != 200 or ext is None or (resp.content_length or 0) > max_bytes:
-            return None
-        data = bytearray()
-        async for chunk in resp.content.iter_chunked(64 * 1024):
-            data.extend(chunk)
-            if len(data) > max_bytes:
-                return None
-        return bytes(data), ext
+        return await cards.read_image(resp, max_bytes)
 
 
-async def fetch_cover(session: aiohttp.ClientSession, gallery: Gallery, max_bytes: int) -> Cover | None:
+async def fetch_cover(
+    session: aiohttp.ClientSession, gallery: Gallery, meta: dict[str, Any], max_bytes: int
+) -> Cover | None:
     """The gallery's first page at full size: gallery page -> page 1 -> image. None on any failure.
 
-    The image is uploaded with the card rather than linked, because e-hentai's image links expire."""
+    The image is uploaded with the card rather than linked, because e-hentai's image links expire.
+    meta is unused: the API doesn't list pages, so they're scraped."""
     limit = min(max_bytes, COVER_MAX_BYTES)
     cached = _cover_cache.get(gallery.gid)
     if cached is not None and len(cached[0]) <= limit:
@@ -223,40 +209,28 @@ async def fetch_cover(session: aiohttp.ClientSession, gallery: Gallery, max_byte
 # --- the card --------------------------------------------------------------------------------
 
 
-def _link_text(text: str) -> str:
-    """Brackets would end a markdown link label early; titles are full of them."""
-    return text.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
-
-
 def card_text(meta: dict[str, Any], gallery: Gallery) -> str:
     title = html.unescape(str(meta.get("title") or meta.get("title_jpn") or f"Gallery {gallery.gid}"))
     stats = [str(meta.get("category") or "").strip(), f"{meta.get('filecount', '?')} pages"]
     if meta.get("rating"):
         stats.append(f"★ {meta['rating']}")
-    lines = [
-        f"### [{_link_text(_clip(title, 256))}]({gallery.link})",
-        " · ".join(s for s in stats if s),
-        "",
-        *tag_lines(list(meta.get("tags") or ())),
-    ]
-    return "\n".join(lines)[:3500]
+    return cards.card_body(title, gallery.link, stats, tag_lines(list(meta.get("tags") or ())))
 
 
 def build_card(
     meta: dict[str, Any], gallery: Gallery, *, cover: Cover | None, quip: str | None = None
 ) -> discord.ui.LayoutView:
-    """Components V2 card: big cover on top, then title, stats and tags, then the link button, all in a
-    purple container. The cover is the uploaded full-size first page, else the API's small thumbnail.
-    Spoilered links get a blurred cover."""
-    view = discord.ui.LayoutView(timeout=None)
-    if quip:
-        view.add_item(discord.ui.TextDisplay(f"-# {quip}"))
-    container = discord.ui.Container(accent_colour=BB_PURPLE)
+    """The card, with the uploaded full-size first page on top, else the API's small thumbnail."""
     thumb = meta.get("thumb")
-    media = f"attachment://{cover.filename}" if cover else thumb if isinstance(thumb, str) else None
-    if media and (cover or media.startswith("https://")):
-        container.add_item(discord.ui.MediaGallery(discord.MediaGalleryItem(media, spoiler=gallery.spoiler)))
-    container.add_item(discord.ui.TextDisplay(card_text(meta, gallery)))
-    container.add_item(discord.ui.ActionRow(discord.ui.Button(label=gallery.open_label, url=gallery.link)))
-    view.add_item(container)
-    return view
+    if cover:
+        media: str | None = f"attachment://{cover.filename}"
+    else:
+        media = thumb if isinstance(thumb, str) and thumb.startswith("https://") else None
+    return cards.card_view(
+        card_text(meta, gallery),
+        link=gallery.link,
+        label=gallery.open_label,
+        media=media,
+        spoiler=gallery.spoiler,
+        quip=quip,
+    )

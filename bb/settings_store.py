@@ -8,7 +8,7 @@ from typing import Any, Literal
 
 from bb.db import Database
 
-SITE_IDS = ("twitter", "pixiv", "reddit", "tiktok", "bluesky", "instagram", "ehentai")
+SITE_IDS = ("twitter", "pixiv", "reddit", "tiktok", "bluesky", "instagram", "ehentai", "nhentai")
 CHANNEL_LIST_FIELDS = ("channels", "lewd_channels", "chaos_channels")
 
 

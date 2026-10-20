@@ -51,6 +51,7 @@ _SITE_NAMES = {
     "bluesky": "Bluesky",
     "instagram": "Instagram",
     "ehentai": "e-hentai",
+    "nhentai": "nhentai",
 }
 QUIP_CHOICES: tuple[tuple[str, int], ...] = (
     ("Off", 0),
