@@ -147,18 +147,24 @@ def _back_off(resp: aiohttp.ClientResponse, what: str) -> None:
 
 
 async def _get_json(session: aiohttp.ClientSession, path: str) -> Any:
-    """GET an API path and decode it. None on errors, non-200s and 429s (which start the backoff)."""
+    """GET an API path and decode it. None on errors, non-200s and 429s (which start the backoff).
+    A rejected API key is dropped for good and the request retried without it: a typo in the key
+    costs the higher rate limit, not every card."""
+    global _api_key
     async with session.get(f"{API_URL}{path}", headers=_api_headers(), timeout=API_TIMEOUT) as resp:
-        if resp.status == 429:
+        status = resp.status
+        if status == 200:
+            return await resp.json(content_type=None)
+        if status == 429:
             _back_off(resp, "API")
             return None
-        if resp.status != 200:
-            level = logging.INFO if resp.status == 404 else logging.WARNING
-            log.log(level, "nhentai API answered %s for %s", resp.status, path)
-            if resp.status == 401 and _api_key:
-                log.warning("nhentai rejected the API key: check NHENTAI_API_KEY")
-            return None
-        return await resp.json(content_type=None)
+    if status == 401 and _api_key:
+        log.warning("nhentai rejected the API key (check NHENTAI_API_KEY): carrying on without it")
+        _api_key = None
+        return await _get_json(session, path)
+    level = logging.INFO if status == 404 else logging.WARNING  # 404: deleted or hidden gallery
+    log.log(level, "nhentai API answered %s for %s", status, path)
+    return None
 
 
 async def _fetch_gallery(session: aiohttp.ClientSession, gid: int) -> dict[str, Any] | None:

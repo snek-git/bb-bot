@@ -216,6 +216,19 @@ async def test_fetch_metadata_sends_the_api_key():
     assert nhentai._api_key is None
 
 
+async def test_a_rejected_key_falls_back_to_anonymous():
+    class KeyCheck(Session):
+        def get(self, url, headers=None, timeout=None):
+            self.calls.append((url, dict(headers or {})))
+            return Response(401, {"error": "Invalid API key"}) if headers else Response(body=meta())
+
+    nhentai.set_api_key("typo")
+    session = KeyCheck({})
+    assert list(await nhentai.fetch_metadata(session, nhentai.find_galleries(N1))) == [450000]
+    assert [headers for _, headers in session.calls] == [{"Authorization": "Key typo"}, {}]
+    assert nhentai._api_key is None  # later requests don't try the bad key again
+
+
 async def test_fetch_metadata_drops_odd_answers():
     session = Session({f"{API}/galleries/450000": Response(body=meta(gid=1))})  # someone else's gallery
     assert await nhentai.fetch_metadata(session, nhentai.find_galleries(N1)) == {}
