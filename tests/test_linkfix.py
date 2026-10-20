@@ -964,17 +964,6 @@ async def test_editing_a_message_keeps_its_nhentai_card(h, db, cards, nh_fetch):
     assert nh_fetch == [[450000]]  # and edits don't post a second card
 
 
-async def test_blocked_nhentai_gallery_gets_nothing(h, db, cards, monkeypatch):
-    async def fetch(session, galleries):
-        return nh_meta(tags=[{"type": "tag", "name": "lolicon"}])
-
-    monkeypatch.setattr(lf.nhentai, "fetch_metadata", fetch)
-    await h.cog.process(message(NH))
-    assert cards == []
-    assert await db.post_keys_for_message(500) == set()  # not even a record
-    assert h.original == []
-
-
 async def test_nhentai_cards_can_be_turned_off_alone(h, db, cards, nh_fetch, monkeypatch):
     async def fetch(session, galleries):
         return eh_meta()

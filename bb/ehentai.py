@@ -1,8 +1,5 @@
 """e-hentai gallery cards. e-hentai pages have no preview tags and no fixer service exists, so BB builds
 the card herself from the official API (api.e-hentai.org, method "gdata").
-
-Galleries tagged lolicon, shotacon or toddlercon (any namespace) are skipped entirely: no card, no
-record. That rule has no setting.
 """
 
 from __future__ import annotations
@@ -34,7 +31,6 @@ _GALLERY = re.compile(
     r"https?://(?:www\.)?(?P<host>e-hentai\.org|exhentai\.org)/g/(?P<gid>\d{1,10})/(?P<token>[0-9a-f]{10})\b",
     re.IGNORECASE,
 )
-BLOCKED_TAGS = frozenset({"lolicon", "shotacon", "toddlercon"})
 SHOWN_NAMESPACES = (
     ("parody", "Parody"),
     ("character", "Characters"),
@@ -88,14 +84,6 @@ def find_galleries(content: str) -> list[Gallery]:
         if len(found) >= MAX_GALLERIES:
             break
     return found
-
-
-def is_blocked(meta: dict[str, Any]) -> bool:
-    for tag in meta.get("tags") or ():
-        name = str(tag).rpartition(":")[2].strip().lower()
-        if name in BLOCKED_TAGS:
-            return True
-    return False
 
 
 def parse_gdata(payload: dict[str, Any]) -> dict[int, dict[str, Any]]:

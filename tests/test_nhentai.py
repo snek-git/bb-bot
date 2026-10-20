@@ -127,19 +127,6 @@ def test_gallery_as_match():
     assert (m.site.id, m.url, m.canonical_key, m.spoiler) == ("nhentai", N1, "nhentai:450000", True)
 
 
-def test_blocked_tags_by_name_whatever_the_type():
-    blocked = (
-        {"type": "tag", "name": "lolicon"},
-        {"type": "tag", "name": "Shotacon"},
-        {"name": "toddlercon"},  # whatever the type, even none
-    )
-    for tag in blocked:
-        assert nhentai.is_blocked(meta(tags=[{"type": "parody", "name": "x"}, tag])), tag
-    assert not nhentai.is_blocked(meta())
-    assert not nhentai.is_blocked(meta(tags=[]))
-    assert not nhentai.is_blocked({"tags": "lolicon"})  # malformed: not a list
-
-
 # --- the card -------------------------------------------------------------------------------
 
 

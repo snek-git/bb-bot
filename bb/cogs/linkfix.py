@@ -52,7 +52,7 @@ WEBHOOK_NAME = "BB"
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 SETTLED_OK = ("ok", "uploaded")
 # Sites no fixer covers, where BB builds her own gallery card. Each module has the same surface:
-# SITE_ID, SITE, find_galleries, fetch_metadata, is_blocked, fetch_cover and build_card.
+# SITE_ID, SITE, find_galleries, fetch_metadata, fetch_cover and build_card.
 CARD_SOURCES = (ehentai, nhentai)
 CARD_SITE_IDS = frozenset(source.SITE_ID for source in CARD_SOURCES)
 
@@ -954,8 +954,8 @@ class LinkFix(commands.Cog):
     # --- gallery cards (e-hentai, nhentai) ------------------------------------------------
 
     async def _post_cards(self, message: discord.Message, settings: GuildSettings) -> int:
-        """BB's own card for each gallery link on a card site that's turned on (blocked tags: nothing at
-        all, not even a record). Returns how many cards were posted."""
+        """BB's own card for each gallery link on a card site that's turned on. Returns how many cards
+        were posted."""
         posted = 0
         for source in CARD_SOURCES:
             if settings.site_enabled(source.SITE_ID):
@@ -971,16 +971,9 @@ class LinkFix(commands.Cog):
         guild = message.guild
         assert guild is not None
         quip_channel = _parent_id(message.channel) or message.channel.id
-        kept: list[tuple[Any, dict[str, Any]]] = []
-        for gallery in galleries:
-            meta = metas.get(gallery.gid)
-            if meta is None:
-                continue
-            if source.is_blocked(meta):
-                what = f"{source.SITE_ID} gallery {gallery.gid}"
-                log.info("skipped %s on message %s: blocked tag", what, message.id)
-                continue
-            kept.append((gallery, meta))
+        kept: list[tuple[Any, dict[str, Any]]] = [
+            (gallery, metas[gallery.gid]) for gallery in galleries if gallery.gid in metas
+        ]
         covers = await asyncio.gather(
             *(source.fetch_cover(self.bot.http_client, g, meta, guild.filesize_limit) for g, meta in kept)
         )

@@ -9,9 +9,6 @@ House rules from https://nhentai.net/api/v2/docs:
 * Take the CDN hosts from /api/v2/cdn, never hardcode them, and use media paths exactly as the API
   returns them: the CDN bans clients that request URLs it doesn't recognise.
 * Treat 429 as a backoff signal. It comes with Retry-After (60 seconds when seen in 2026-10).
-
-Galleries tagged lolicon, shotacon or toddlercon are skipped entirely: no card, no record. That rule has
-no setting.
 """
 
 from __future__ import annotations
@@ -42,7 +39,6 @@ OPEN_LABEL = "Open on nhentai"
 
 # Gallery pages and reader pages (/g/<id>/<page>/) alike.
 _GALLERY = re.compile(r"https?://(?:www\.)?nhentai\.net/g/(?P<id>\d{1,9})(?=/|$|[?#])", re.IGNORECASE)
-BLOCKED_TAGS = frozenset({"lolicon", "shotacon", "toddlercon"})
 SHOWN_TYPES = (
     ("parody", "Parody"),
     ("character", "Characters"),
@@ -108,14 +104,6 @@ def find_galleries(content: str) -> list[Gallery]:
         if len(found) >= MAX_GALLERIES:
             break
     return found
-
-
-def is_blocked(meta: dict[str, Any]) -> bool:
-    """Any blocked tag, whatever its type."""
-    tags = meta.get("tags")
-    if not isinstance(tags, list):
-        return False
-    return any(isinstance(t, dict) and str(t.get("name", "")).strip().lower() in BLOCKED_TAGS for t in tags)
 
 
 # --- API --------------------------------------------------------------------------------------
