@@ -15,8 +15,13 @@ from bb.settings_store import SettingsStore
 T0 = 1_800_000_000.0  # some Tuesday
 
 
-def event(id, name, start, end, type="eventQuest"):
-    return {"id": id, "type": type, "name": name, "startedAt": start, "endedAt": end}
+def event(id, name, start, end, type="eventQuest", wars=()):
+    return {"id": id, "type": type, "name": name, "startedAt": start, "endedAt": end, "warIds": list(wars)}
+
+
+def war(*closed_at):
+    """A war page whose quests close at these times."""
+    return {"spots": [{"quests": [{"closedAt": t} for t in closed_at]}, {"quests": []}]}
 
 
 def banner(id, name, start, end, pickups=(), type="stone"):
@@ -54,6 +59,30 @@ def test_events_keep_event_quests_once():
         event(3, "AP Cost 1/2", T0, T0 + 20 * DAY, type="questCampaign"),
     ])
     assert [(e.id, e.name) for e in events] == [(1, "Halloween 2026")]
+
+
+PLACEHOLDER = T0 + 1165 * DAY  # "until 2029"
+
+
+def test_only_recent_events_listed_for_years_need_a_real_end():
+    (grand, story, short, no_wars) = news.parse_events([
+        event(80637, "冠位名代戦", T0, PLACEHOLDER, wars=[8413]),
+        event(2, "Lostbelt No.7", T0 - 400 * DAY, PLACEHOLDER, wars=[307]),
+        event(3, "Halloween", T0, T0 + 20 * DAY, wars=[9205]),
+        event(4, "Trial quest", T0, PLACEHOLDER),
+    ])
+    assert grand.war_ids == (8413,)
+    assert news.needs_real_end(grand, T0 + 5 * DAY)
+    assert not news.needs_real_end(grand, T0 + 61 * DAY)
+    assert not any(news.needs_real_end(e, T0 + 5 * DAY) for e in (story, short, no_wars))
+
+
+def test_quest_end_is_the_last_limited_quest():
+    # the Grand event: 8 quests close a week in, one stays open "until 2029"
+    assert news.quest_end(war(*[T0 + 6.8 * DAY] * 8, PLACEHOLDER), T0) == T0 + 6.8 * DAY
+    assert news.quest_end(war(T0 + 2 * DAY, T0 + 7 * DAY), T0) == T0 + 7 * DAY
+    assert news.quest_end(war(PLACEHOLDER), T0) is None  # permanent content
+    assert news.quest_end({"spots": []}, T0) is None
 
 
 def test_shared_servant_names_get_their_class():
@@ -258,32 +287,32 @@ def test_start_posts_carry_pictures_and_reminders_dont():
 class _Channel:
     def __init__(self, error: Exception | None = None):
         self.sent: list[str] = []
-        self.embeds: list[discord.Embed | None] = []
+        self.files: list[tuple[str, bytes] | None] = []
         self.error = error
 
     async def send(self, content, **kwargs):
         assert kwargs["allowed_mentions"].everyone is False
+        assert "embed" not in kwargs  # pictures go up as plain files
         if self.error:
             raise self.error
         self.sent.append(content)
-        self.embeds.append(kwargs.get("embed"))
+        file = kwargs.get("file")
+        self.files.append((file.filename, file.fp.read()) if file else None)
 
 
 class _Http:
-    """Atlas as BB sees it: pages are JSON answers by URL, pictures the image URLs that exist."""
+    """Atlas as BB sees it: pages are JSON answers by URL, pictures the image bytes by URL."""
 
-    def __init__(self, pages=None, pictures=()):
-        self.pages, self.pictures, self.calls = pages or {}, set(pictures), []
+    def __init__(self, pages=None, pictures=None):
+        self.pages, self.pictures, self.calls = pages or {}, pictures or {}, []
 
     def get(self, url, headers=None):
         self.calls.append(("get", url))
-        return _Response(200, self.pages[url]) if url in self.pages else _Response(404)
-
-    def head(self, url):
-        self.calls.append(("head", url))
         if url in self.pictures:
-            return _Response(200, content_type="image/png")
-        return _Response(404, content_type="application/json")
+            return _Response(200, content_type="image/png", data=self.pictures[url])
+        if url in self.pages:
+            return _Response(200, self.pages[url])
+        return _Response(404, content_type="application/json", data=b'{"detail":"Not Found"}')
 
 
 def _guild(channel, channel_id=55):
@@ -322,12 +351,13 @@ async def test_posts_once_and_survives_restart(db):
 
 EVENT_ART = "https://static.atlasacademy.io/JP/Banner/event_war_80613.png"
 BANNER_ART = "https://static.atlasacademy.io/JP/SummonBanners/img_summon_83838.png"
+PNG = b"\x89PNG\r\n\x1a\n" + bytes(200_000)  # bigger than one download chunk
 
 
-async def test_posts_show_pictures_under_their_text(db):
+async def test_posts_attach_their_pictures_as_files(db):
     http = _Http(
         pages={news.EVENT_API.format(id=1): {"banner": EVENT_ART}},
-        pictures={EVENT_ART, BANNER_ART},
+        pictures={EVENT_ART: PNG, BANNER_ART: PNG[:5000]},
     )
     halloween_banner = banner(10, "Halloween banner", T0 - 600, T0 + 20 * DAY, [1]) | {"imageId": 83838}
     cog = _cog(db, [HALLOWEEN], [halloween_banner], http=http)
@@ -336,7 +366,7 @@ async def test_posts_show_pictures_under_their_text(db):
     assert await cog.post_due(_guild(channel), T0) == 2
     assert channel.sent[0].startswith("**Event started** · [Halloween]")
     assert channel.sent[1].startswith("**New banner** · Halloween banner")
-    assert [e.image.url for e in channel.embeds] == [EVENT_ART, BANNER_ART]
+    assert channel.files == [("event_war_80613.png", PNG), ("img_summon_83838.png", PNG[:5000])]
 
 
 async def test_missing_pictures_fall_back_to_text(db):
@@ -347,7 +377,45 @@ async def test_missing_pictures_fall_back_to_text(db):
     await cog.bot.settings.update(1, news_channel_id=55)
     channel = _Channel()
     assert await cog.post_due(_guild(channel), T0) == 1
-    assert channel.embeds == [None] and "**New banner**" in channel.sent[0]
+    assert channel.files == [None] and "**New banner**" in channel.sent[0]
+
+
+async def test_pictures_too_big_to_upload_are_left_out(db, monkeypatch):
+    monkeypatch.setattr("bb.cogs.news.MAX_PICTURE", 100_000)
+    cog = _cog(db, http=_Http(pictures={BANNER_ART: PNG}))
+    assert await cog.picture(BANNER_ART) is None
+
+
+async def test_the_grand_event_gets_its_real_end_and_reminders(db):
+    # listed "until 2029"; its quests close 6.8 days in: that's the end BB uses
+    grand = event(80637, "冠位名代戦", T0, PLACEHOLDER, wars=[8413])
+    http = _Http(pages={news.WAR_API.format(id=8413): war(*[T0 + 6.8 * DAY] * 8, PLACEHOLDER)})
+    cog = _cog(db, http=http)
+    (fixed,) = await cog.with_real_ends(news.parse_events([grand]), T0 + 5 * DAY)
+    assert fixed.end == T0 + 6.8 * DAY
+    cog.data = Data([fixed], [], SERVANTS)
+    await cog.bot.settings.update(1, news_channel_id=55)
+    await db.mark_news_posted(1, [("event:80637", START)])
+    channel = _Channel()
+    assert await cog.post_due(_guild(channel), T0 + 5 * DAY) == 1
+    assert channel.sent[0].startswith("**2 days left** · [冠位名代戦]")
+    assert f"<t:{int(T0 + 6.8 * DAY)}:R>" in channel.sent[0]
+
+
+async def test_real_ends_are_cached_and_survive_a_failed_lookup(db):
+    grand = news.parse_events([event(80637, "冠位名代戦", T0, PLACEHOLDER, wars=[8413])])[0]
+    http = _Http(pages={news.WAR_API.format(id=8413): war(T0 + 7 * DAY)})
+    cog = _cog(db, http=http)
+    assert await cog.real_end(grand, T0 + DAY) == T0 + 7 * DAY
+    assert await cog.real_end(grand, T0 + DAY + 3600) == T0 + 7 * DAY
+    assert len(http.calls) == 1  # the second answer came from the cache
+    http.pages.clear()  # Atlas is down when the cache runs out
+    assert await cog.real_end(grand, T0 + 2 * DAY) == T0 + 7 * DAY
+    http.pages[news.WAR_API.format(id=1)] = war(PLACEHOLDER)
+    permanent = news.parse_events([event(5, "Trial quest", T0, PLACEHOLDER, wars=[1])])[0]
+    assert await cog.real_end(permanent, T0 + DAY) is None
+    (unchanged,) = await cog.with_real_ends([permanent], T0 + DAY)
+    assert unchanged.end == PLACEHOLDER
 
 
 async def test_failed_event_lookups_are_tried_again(db):
@@ -388,9 +456,18 @@ async def test_server_errors_retry_but_forbidden_and_deleted_channels_skip(db):
     assert ("event:2", START) in await db.news_posted(1)
 
 
+class _Body:
+    def __init__(self, data):
+        self.data = data
+
+    async def iter_chunked(self, size):
+        for i in range(0, len(self.data), size):
+            yield self.data[i : i + size]
+
+
 class _Response:
-    def __init__(self, status, body=None, etag=None, content_type=None):
-        self.status, self.body = status, body
+    def __init__(self, status, body=None, etag=None, content_type=None, data=b""):
+        self.status, self.body, self.content = status, body, _Body(data)
         self.headers = {"ETag": etag} if etag else {}
         if content_type:
             self.headers["Content-Type"] = content_type
@@ -424,8 +501,8 @@ async def test_refresh_reuses_unchanged_exports(db):
         return _Response(200, bodies[url], etag=f'"{url}"')
 
     cog = News(SimpleNamespace(http_client=SimpleNamespace(get=get)))
-    assert await cog.refresh() is True
-    assert await cog.refresh() is True
+    assert await cog.refresh(T0) is True
+    assert await cog.refresh(T0 + 900) is True
     assert all(headers == {} for _, headers in calls[:3])
     assert all(headers for _, headers in calls[3:])
     assert [e.name for e in cog.data.events] == ["Halloween"] and cog.data.servants[1].name == "Yamato Takeru"
@@ -438,7 +515,7 @@ async def test_failed_refresh_keeps_the_old_data(db):
     cog = _cog(db, [HALLOWEEN])
     old = cog.data
     cog.bot.http_client = SimpleNamespace(get=get)
-    assert await cog.refresh() is False
+    assert await cog.refresh(T0) is False
     assert cog.data is old
 
 
@@ -446,7 +523,7 @@ async def test_a_broken_export_keeps_the_loop_and_the_old_data(db, monkeypatch):
     cog = _cog(db, [HALLOWEEN])
     old = cog.data
 
-    async def broken():
+    async def broken(ts):
         raise KeyError("startedAt")
 
     monkeypatch.setattr(cog, "refresh", broken)

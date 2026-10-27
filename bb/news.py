@@ -7,13 +7,18 @@ What gets posted:
 - an event (eventQuest) that started in the last FRESH seconds; campaigns like "AP cost 1/2" are skipped
 - banners (Saint Quartz and paid ones) that opened in the last FRESH seconds, grouped by campaign
 - "2 days left" and "last day" for events and banner groups that run at most LONG seconds. Longer ones
-  (story chapters, the Grand event) end on a placeholder date far in the future, so they only get the
+  (story chapters, the trial quest) end on a placeholder date far in the future, so they only get the
   start post. Banners that end together with an event get no reminder of their own.
+
+Some limited events are listed with that placeholder too (the Grand event 冠位名代戦: "until 2029",
+while its quests close a week after it opens). For those the cog reads the quests' close time
+(quest_end) and swaps it in before anything here sees the event.
 
 Every (item, phase) pair is recorded once posted, so nothing is posted twice.
 
 Start posts carry a picture: a banner post its first new banner's art, an event post the event's banner
-(the cog looks that one up, since the exports don't have it). Reminders are text only.
+(the cog looks that one up, since the exports don't have it, and attaches both as files). Reminders are
+text only.
 """
 
 from __future__ import annotations
@@ -34,6 +39,7 @@ BANNERS_URL = f"{EXPORT}/nice_gacha_lang_en.json"
 SERVANTS_URL = f"{EXPORT}/basic_servant_lang_en.json"
 EVENT_PAGE = f"https://apps.atlasacademy.io/db/{REGION}/event/{{id}}"
 EVENT_API = f"https://api.atlasacademy.io/nice/{REGION}/event/{{id}}"  # has the event's banner image
+WAR_API = f"https://api.atlasacademy.io/nice/{REGION}/war/{{id}}"  # has its quests' close times
 BANNER_ART = f"https://static.atlasacademy.io/{REGION}/SummonBanners/img_summon_{{id}}.png"
 
 DAY = 86400.0
@@ -58,6 +64,7 @@ class Event:
     name: str
     start: float
     end: float
+    war_ids: tuple[int, ...] = ()
 
     @property
     def key(self) -> str:
@@ -122,7 +129,13 @@ def parse_events(raw: Iterable[dict[str, Any]]) -> list[Event]:
     for item in raw:
         if item.get("type") != "eventQuest":
             continue
-        event = Event(int(item["id"]), _flat(item["name"]), float(item["startedAt"]), float(item["endedAt"]))
+        event = Event(
+            int(item["id"]),
+            _flat(item["name"]),
+            float(item["startedAt"]),
+            float(item["endedAt"]),
+            tuple(int(i) for i in item.get("warIds") or ()),
+        )
         if (event.name, event.start) in seen:
             continue
         seen.add((event.name, event.start))
@@ -143,6 +156,24 @@ def parse_banners(raw: Iterable[dict[str, Any]]) -> list[Banner]:
         for item in raw
         if item.get("type") in BANNER_TYPES
     ]
+
+
+def needs_real_end(event: Event, ts: float) -> bool:
+    """Listed as running for years, started recently and has quests: worth asking its quests when it
+    really ends. Story chapters started long ago are left alone."""
+    return event.end - event.start > LONG and event.start <= ts < event.start + LONG and bool(event.war_ids)
+
+
+def quest_end(war: dict[str, Any], start: float) -> float | None:
+    """When an event's quests really close: the latest quest close time within LONG of its start.
+    None when every quest stays open for good (permanent content)."""
+    ends = [
+        float(quest["closedAt"])
+        for spot in war.get("spots") or ()
+        for quest in spot.get("quests") or ()
+        if start < float(quest.get("closedAt") or 0) <= start + LONG
+    ]
+    return max(ends) if ends else None
 
 
 def _class_label(class_name: str) -> str:

@@ -397,8 +397,13 @@ async def test_news_section_and_private_preview(panel):
     async def add_images(notices):
         notices[0].image = "https://x/art.png"
 
+    def send_kwargs(message):
+        return {"content": message.text, "file": message.image}
+
     def preview(live):
-        panel.bot.get_cog = lambda name: SimpleNamespace(live=lambda ts: live, add_images=add_images)
+        panel.bot.get_cog = lambda name: SimpleNamespace(
+            live=lambda ts: live, add_images=add_images, send_kwargs=send_kwargs
+        )
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=7),
             response=SimpleNamespace(defer=AsyncMock()),
@@ -412,11 +417,11 @@ async def test_news_section_and_private_preview(panel):
     title, item = [call.kwargs for call in interaction.followup.send.await_args_list]
     assert title["ephemeral"] and "Only you can see this" in title["content"]
     assert item["ephemeral"] and item["content"] == "**New banner** · X"
-    assert item["embed"].image.url == "https://x/art.png"
+    assert item["file"] == "https://x/art.png"
 
     interaction = preview(None)  # nothing fetched yet
     await find(panel, panel_mod.NewsPreviewButton).callback(interaction)
-    assert "hasn't got the FGO data" in interaction.followup.send.await_args.kwargs["content"]
+    assert "hasn't got the FGO data" in interaction.followup.send.await_args.args[0]
 
 
 async def test_pause_switch(panel):

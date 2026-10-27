@@ -17,7 +17,6 @@ from discord.ext import commands
 
 from bb import news, strings
 from bb.cogs.linkfix import rare_line
-from bb.cogs.news import send_kwargs
 from bb.links import sites
 from bb.settings_store import MAX_RARE_LINES, SITE_IDS, GuildSettings, RareLine
 from bb.timeutil import now, zone
@@ -499,14 +498,16 @@ class NewsPreviewButton(_Item, discord.ui.Button):
         await interaction.response.defer(ephemeral=True, thinking=True)
         cog = self.panel.bot.get_cog("News")
         notices = cog.live(now()) if cog is not None else None
-        if notices is None:
-            notices = [news.Notice(strings.line("news.no_data"))]
-        else:
-            await cog.add_images(notices)
-            notices = notices or [news.Notice(strings.line("news.nothing"))]
-            notices.insert(0, news.Notice(strings.line("news.preview_title")))
+        if cog is None or notices is None:
+            await interaction.followup.send(
+                strings.line("news.no_data"), ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
+            )
+            return
+        await cog.add_images(notices)
+        notices = notices or [news.Notice(strings.line("news.nothing"))]
+        notices.insert(0, news.Notice(strings.line("news.preview_title")))
         for message in news.messages(notices):
-            await interaction.followup.send(ephemeral=True, **send_kwargs(message))
+            await interaction.followup.send(ephemeral=True, **cog.send_kwargs(message))
 
 
 class SetButton(_Item, discord.ui.Button):
