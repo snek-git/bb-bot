@@ -10,7 +10,10 @@ Real end dates: some limited events (the Grand event, for one) are listed as run
 placeholder date years away. Their quests close on the real date, so for each such event that started
 recently, BB reads its war's quests and uses that date instead (see news.quest_end).
 
-Pictures: an event's banner comes from its own API page, fetched only when a post needs it. Atlas lists
+Event details: an event's own API page, fetched only when a start post needs it, gives its type (raid,
+box gacha, shop...) and free servant for the post, and its banner.
+
+Pictures: an event's banner comes from that page. Atlas lists
 some that don't exist (the Grand event's), so an event post falls back to the art of a banner named
 after the event, then to its war's banner. Pictures are downloaded and attached as files, as they are.
 A post with no working picture just goes out as text.
@@ -54,7 +57,7 @@ class News(commands.Cog):
         self._etags: dict[str, str] = {}
         self._raw: dict[str, Any] = {}
         self.data: Data | None = None
-        self._event_art: dict[int, str | None] = {}  # event id -> its banner picture (None: it has none)
+        self._event_pages: dict[int, news.EventPage] = {}  # event id -> its banner, type and free servants
         self._war_art: dict[int, str | None] = {}  # war id -> its banner picture
         self._pictures: dict[str, bytes | None] = {}  # picture URL -> its bytes (None: it doesn't exist)
         self._real_ends: dict[int, tuple[float, float | None]] = {}  # event id -> (looked up at, end)
@@ -148,18 +151,18 @@ class News(commands.Cog):
         self._real_ends[event.id] = (ts, end)
         return end
 
-    async def event_art(self, event_id: int) -> str | None:
-        """The event's banner picture. A failed lookup isn't remembered, so the next post tries again."""
-        if event_id in self._event_art:
-            return self._event_art[event_id]
+    async def event_page(self, event_id: int) -> news.EventPage | None:
+        """The event's banner, type and free servants. A failed lookup isn't remembered, so the next post
+        tries again."""
+        if event_id in self._event_pages:
+            return self._event_pages[event_id]
         try:
-            body = await self._get_json(news.EVENT_API.format(id=event_id))
+            page = news.parse_event_page(await self._get_json(news.EVENT_API.format(id=event_id)))
         except FETCH_ERRORS as exc:
             log.info("news: couldn't look up event %s: %r", event_id, exc)
             return None
-        art = body.get("banner") or body.get("noticeBanner") or None
-        self._event_art[event_id] = art
-        return art
+        self._event_pages[event_id] = page
+        return page
 
     async def picture(self, url: str) -> bytes | None:
         """The picture's bytes, or None if it doesn't exist, isn't an image, or is too big to upload."""
@@ -196,21 +199,28 @@ class News(commands.Cog):
         self._war_art[war_id] = art
         return art
 
-    async def _event_pictures(self, notice: news.Notice) -> AsyncIterator[str | None]:
+    async def _event_pictures(
+        self, notice: news.Notice, page: news.EventPage | None
+    ) -> AsyncIterator[str | None]:
         """An event post's pictures, best first: its own banner, banners named after it, its war's banner.
         Each is looked up only if the ones before it are missing."""
         assert notice.event is not None
-        yield await self.event_art(notice.event.id)
+        yield page.art if page else None
         for url in notice.fallbacks:
             yield url
         for war_id in notice.event.war_ids:
             yield await self.war_art(war_id)
 
-    async def add_images(self, notices: list[news.Notice]) -> None:
-        """Pick and download every post's picture, in place; a post with no working picture gets none."""
+    async def add_details(self, notices: list[news.Notice]) -> None:
+        """What the exports don't have, in place: an event post's type and free servant, and every post's
+        picture, downloaded. A post with no working picture gets none."""
+        servants = self.data.servants if self.data else {}
         for notice in notices:
             if notice.event is not None and notice.image is None:
-                async for url in self._event_pictures(notice):
+                page = await self.event_page(notice.event.id)
+                if page is not None:
+                    notice.text = news.event_start(notice.event, page, servants)
+                async for url in self._event_pictures(notice, page):
                     if url and await self.picture(url) is not None:
                         notice.image = url
                         break
@@ -219,7 +229,7 @@ class News(commands.Cog):
 
     def send_kwargs(self, message: news.Notice) -> dict[str, Any]:
         """channel.send / followup.send arguments: the text, with the picture attached as a file.
-        Call add_images first: a picture that wasn't downloaded is left out."""
+        Call add_details first: a picture that wasn't downloaded is left out."""
         kwargs: dict[str, Any] = {"content": message.text, "allowed_mentions": discord.AllowedMentions.none()}
         data = self._pictures.get(message.image) if message.image else None
         if data:
@@ -254,7 +264,7 @@ class News(commands.Cog):
             await self.bot.db.mark_news_posted(guild.id, [m for n in due for m in n.marks], ts)
             return 0
 
-        await self.add_images(due)
+        await self.add_details(due)
         sent = 0
         for message in news.messages(due):
             try:

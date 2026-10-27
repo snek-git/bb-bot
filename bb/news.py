@@ -16,6 +16,9 @@ while its quests close a week after it opens). For those the cog reads the quest
 
 Every (item, phase) pair is recorded once posted, so nothing is posted twice.
 
+An event's start post also says what kind of event it is and who joins free (event_details), from the
+event's own page, which the cog looks up.
+
 Start posts carry a picture: a banner post its first new banner's art, an event post the event's banner
 (the cog looks that one up, since the exports don't have it, and attaches both as files). Reminders are
 text only.
@@ -53,6 +56,24 @@ RERUN = "復刻"
 BANNER_TYPES = {"stone", "chargeStone"}  # Saint Quartz and paid banners; Friend Point ones aren't news
 _BANNER_SUFFIX = re.compile(r"(ピックアップ)?召喚$")
 MIN_SHARED = 6  # banners ending together whose names share this many leading characters are one group
+
+# Event flags worth a word in the start post, in the order they're shown: what you do first, then the
+# rest. Bonus servants and the like are in nearly every event, so they're left out.
+EVENT_KINDS: tuple[tuple[str, str], ...] = (
+    ("typeRaid", "Raid"),
+    ("typeBoxGacha", "Box gacha"),
+    ("treasureBox", "Treasure boxes"),
+    ("eventTower", "Tower"),
+    ("eventBoardGame", "Board game"),
+    ("typePoint", "Point rewards"),
+    ("eventPoint", "Point rewards"),
+    ("typeMission", "Missions"),
+    ("typeEventShop", "Shop"),
+    ("typeExchangeShop", "Shop"),
+)
+# "join"/"directJoin": the welfare servant. "condJoin" is a pick-one-of-many campaign (130 servants for
+# the 35M downloads one), which isn't a free servant worth naming.
+FREE_JOINS = {"join", "directJoin"}
 
 START, SOON, LAST = "start", "soon", "last"
 Mark = tuple[str, str]  # (item key, phase)
@@ -102,6 +123,16 @@ class Group:
     title: str
     end: float
     banners: tuple[Banner, ...]
+
+
+@dataclass(frozen=True)
+class EventPage:
+    """What an event's own API page adds to the exports: its banner, what kind of event it is (labels
+    from EVENT_KINDS) and the servants who join for free (welfare servants)."""
+
+    art: str | None = None
+    kinds: tuple[str, ...] = ()
+    free: tuple[int, ...] = ()
 
 
 @dataclass
@@ -158,6 +189,17 @@ def parse_banners(raw: Iterable[dict[str, Any]]) -> list[Banner]:
         for item in raw
         if item.get("type") in BANNER_TYPES
     ]
+
+
+def parse_event_page(body: dict[str, Any]) -> EventPage:
+    flags = set((body.get("eventDetail") or {}).get("flags") or ())
+    kinds = list(dict.fromkeys(label for flag, label in EVENT_KINDS if flag in flags))
+    lotteries = body.get("lotteries") or ()
+    if "Box gacha" in kinds and any(lottery.get("limited") is False for lottery in lotteries):
+        kinds[kinds.index("Box gacha")] = "Box gacha (unlimited)"
+    joins = body.get("svts") or ()
+    free = tuple(dict.fromkeys(int(s["svtId"]) for s in joins if s.get("type") in FREE_JOINS))
+    return EventPage(body.get("banner") or body.get("noticeBanner") or None, tuple(kinds), free)
 
 
 def needs_real_end(event: Event, ts: float) -> bool:
@@ -352,11 +394,30 @@ def _event_link(event: Event) -> str:
     return f"[{name}](<{EVENT_PAGE.format(id=event.id)}>)"
 
 
-def event_start(event: Event) -> str:
+def event_start(
+    event: Event, page: EventPage | None = None, servants: dict[int, Servant] | None = None
+) -> str:
+    """The start post. With the event's page: a line saying what kind of event it is and who joins free."""
     if event.end - event.start > LONG:
-        return strings.line("news.new_content", name=_event_link(event))
-    key = "news.rerun_start" if RERUN in event.name else "news.event_start"
-    return strings.line(key, name=_event_link(event)) + "\n" + _ends(event.end)
+        lines = [strings.line("news.new_content", name=_event_link(event))]
+    else:
+        key = "news.rerun_start" if RERUN in event.name else "news.event_start"
+        lines = [strings.line(key, name=_event_link(event))]
+    details = event_details(page, servants or {}) if page else ""
+    if details:
+        lines.append(details)
+    if event.end - event.start <= LONG:
+        lines.append(_ends(event.end))
+    return "\n".join(lines)
+
+
+def event_details(page: EventPage, servants: dict[int, Servant]) -> str:
+    """'Raid · Shop · Missions · Free servant: Miyamoto Iori (4★)', or '' when the page says nothing."""
+    parts = list(page.kinds)
+    free = [f"{servants[i].name} ({servants[i].rarity}★)" for i in page.free if i in servants]
+    if free:
+        parts.append(strings.line("news.free_servant", servants=", ".join(free)))
+    return " · ".join(parts)
 
 
 def event_ending(event: Event, phase: str) -> str:

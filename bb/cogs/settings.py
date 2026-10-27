@@ -503,7 +503,7 @@ class NewsPreviewButton(_Item, discord.ui.Button):
                 strings.line("news.no_data"), ephemeral=True, allowed_mentions=discord.AllowedMentions.none()
             )
             return
-        await cog.add_images(notices)
+        await cog.add_details(notices)
         notices = notices or [news.Notice(strings.line("news.nothing"))]
         notices.insert(0, news.Notice(strings.line("news.preview_title")))
         for message in news.messages(notices):

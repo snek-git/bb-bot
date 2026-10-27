@@ -413,7 +413,7 @@ async def test_an_event_without_its_own_banner_uses_one_named_after_it():
     )
     cog = News(SimpleNamespace(http_client=http))
     notice = _grand_event_notice()
-    await cog.add_images([notice])
+    await cog.add_details([notice])
     assert notice.image == TAMAMO_ART
     assert ("get", news.WAR_API.format(id=8413)) not in http.calls  # found before the war was needed
     assert cog.send_kwargs(notice)["file"].filename == "img_summon_83847.png"
@@ -427,13 +427,13 @@ async def test_then_its_wars_banner_then_nothing():
     )
     cog = News(SimpleNamespace(http_client=http))
     notice = _grand_event_notice()  # the Tamamo art is gone too
-    await cog.add_images([notice])
+    await cog.add_details([notice])
     assert notice.image == GRAND_DUEL
 
     http.pictures.clear()
     cog = News(SimpleNamespace(http_client=http))
     notice = _grand_event_notice()
-    await cog.add_images([notice])
+    await cog.add_details([notice])
     assert notice.image is None and "file" not in cog.send_kwargs(notice)
 
 
@@ -478,11 +478,62 @@ async def test_real_ends_are_cached_and_survive_a_failed_lookup(db):
 async def test_failed_event_lookups_are_tried_again(db):
     http = _Http()
     cog = _cog(db, http=http)
-    assert await cog.event_art(1) is None
+    assert await cog.event_page(1) is None
     http.pages[news.EVENT_API.format(id=1)] = {"banner": None, "noticeBanner": EVENT_ART}
-    assert await cog.event_art(1) == EVENT_ART
-    assert await cog.event_art(1) == EVENT_ART
+    assert (await cog.event_page(1)).art == EVENT_ART
+    assert (await cog.event_page(1)).art == EVENT_ART
     assert [c for c in http.calls if c[0] == "get"] == [("get", news.EVENT_API.format(id=1))] * 2
+
+
+# Atlas's page for the Samurai Remnant rerun, cut down to what BB reads
+SAMURAI_PAGE = {
+    "banner": EVENT_ART,
+    "eventDetail": {"flags": ["typeExchangeShop", "typeBonusSkill", "typeMission", "typeEventShop",
+                              "eventRevival"]},
+    "svts": [{"svtId": 7, "type": "join"}, {"svtId": 106001, "type": "none"}],
+    "lotteries": [],
+}
+
+
+def test_event_pages_give_type_and_free_servant():
+    page = news.parse_event_page(SAMURAI_PAGE)
+    assert page == news.EventPage(EVENT_ART, ("Missions", "Shop"), (7,))
+    raid = news.parse_event_page({"eventDetail": {"flags": ["typeRaid", "raidDefeatCount"]}})
+    assert raid.kinds == ("Raid",) and raid.free == () and raid.art is None
+    box = news.parse_event_page({"eventDetail": {"flags": ["typeBoxGacha", "typeEventShop"]},
+                                 "lotteries": [{"limited": False}]})
+    assert box.kinds == ("Box gacha (unlimited)", "Shop")
+    pick_one = news.parse_event_page({"svts": [{"svtId": i, "type": "condJoin"} for i in range(130)]})
+    assert pick_one.free == ()
+    joins = [{"svtId": 7, "type": "join"}, {"svtId": 7, "type": "directJoin"}]
+    twice = news.parse_event_page({"svts": joins})
+    assert twice.free == (7,)
+
+
+def test_start_post_with_details():
+    servants = {**SERVANTS, 7: news.Servant("Miyamoto Iori", 4)}
+    ev = news.parse_events([event(80632, "復刻版:盈月剣風帖", T0, T0 + 20 * DAY)])[0]
+    lines = news.event_start(ev, news.parse_event_page(SAMURAI_PAGE), servants).split("\n")
+    assert lines[0].startswith("**Rerun started** · [復刻版:盈月剣風帖]")
+    assert lines[1] == "Missions · Shop · Free servant: Miyamoto Iori (4★)"
+    assert lines[2].startswith("-# Ends <t:")
+    # nothing on the page worth saying: no empty line
+    assert news.event_start(ev, news.EventPage(), servants).count("\n") == 1
+    grand = news.parse_events([event(80637, "冠位名代戦", T0, PLACEHOLDER)])[0]
+    assert news.event_start(grand, news.EventPage(kinds=("Raid",)), servants) == (
+        "**Now open** · [冠位名代戦](<https://apps.atlasacademy.io/db/JP/event/80637>)\nRaid"
+    )
+
+
+async def test_posts_fill_in_details_from_the_event_page(db):
+    http = _Http(pages={news.EVENT_API.format(id=1): SAMURAI_PAGE}, pictures={EVENT_ART: PNG})
+    cog = _cog(db, [HALLOWEEN], http=http)
+    cog.data = Data(cog.data.events, [], {**SERVANTS, 7: news.Servant("Miyamoto Iori", 4)})
+    await cog.bot.settings.update(1, news_channel_id=55)
+    channel = _Channel()
+    assert await cog.post_due(_guild(channel), T0) == 1
+    assert channel.sent[0].split("\n")[1] == "Missions · Shop · Free servant: Miyamoto Iori (4★)"
+    assert channel.files == [("event_war_80613.png", PNG)]
 
 
 async def test_no_channel_paused_or_no_data_posts_nothing(db):

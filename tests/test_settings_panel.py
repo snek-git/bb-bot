@@ -394,7 +394,7 @@ async def test_news_section_and_private_preview(panel):
     await click(panel, find(panel, panel_mod.SetButton, field="news_channel_id"))
     assert "goes to: off" in panel_mod.describe("news", panel.settings)
 
-    async def add_images(notices):
+    async def add_details(notices):
         notices[0].image = "https://x/art.png"
 
     def send_kwargs(message):
@@ -402,7 +402,7 @@ async def test_news_section_and_private_preview(panel):
 
     def preview(live):
         panel.bot.get_cog = lambda name: SimpleNamespace(
-            live=lambda ts: live, add_images=add_images, send_kwargs=send_kwargs
+            live=lambda ts: live, add_details=add_details, send_kwargs=send_kwargs
         )
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=7),

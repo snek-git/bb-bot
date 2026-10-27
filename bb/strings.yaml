@@ -216,6 +216,12 @@ news.new_content:
   lines:
     - "**Now open** · {name}"
 
+# Part of the event details line ("Raid · Shop · Free servant: Miyamoto Iori (4★)").
+news.free_servant:
+  vars: [servants]
+  lines:
+    - "Free servant: {servants}"
+
 news.banner:
   vars: [title]
   lines:
