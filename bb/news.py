@@ -19,9 +19,9 @@ Every (item, phase) pair is recorded once posted, so nothing is posted twice.
 An event's start post also says what kind of event it is and who joins free (event_details), from the
 event's own page, which the cog looks up.
 
-Start posts carry a picture: a banner post its first new banner's art, an event post the event's banner
-(the cog looks that one up, since the exports don't have it, and attaches both as files). Reminders are
-text only.
+Start posts carry a picture: a banner post its first new banner's art, an event post the event's banner,
+or its war's when it has none (the cog looks those up, since the exports don't have them, and attaches
+pictures as files). Reminders are text only.
 """
 
 from __future__ import annotations
@@ -138,14 +138,13 @@ class EventPage:
 @dataclass
 class Notice:
     """One item of a post. marks: what gets recorded once it's sent. image: a picture attached to it.
-    event: the event whose own banner should become the image (the cog looks it up); fallbacks: the
-    pictures to try, in order, when it has none (then the cog tries its war's banner)."""
+    event: the event whose banner (or, without one, its war's) should become the image; the cog looks
+    it up."""
 
     text: str
     marks: list[Mark] = field(default_factory=list)
     image: str | None = None
     event: Event | None = None
-    fallbacks: tuple[str, ...] = ()
 
 
 # --- parsing ----------------------------------------------------------------------------------
@@ -314,7 +313,7 @@ def due(
         if _is_fresh(event.start, event.end, ts) and (event.key, START) not in done:
             # a late start post already says when it ends, so an open reminder is covered too
             marks = [(event.key, START), *_ending_marks(event.key, phase)]
-            starts.append(start_notice(event, groups, marks))
+            starts.append(start_notice(event, marks))
         elif phase and (event.key, phase) not in done:
             endings.append((event.end, Notice(event_ending(event, phase), _ending_marks(event.key, phase))))
 
@@ -344,7 +343,7 @@ def live(events: list[Event], groups: list[Group], servants: dict[int, Servant],
     """Everything running right now, posted or not (the /settings preview). Long-running content is left
     out: it would be the whole story mode."""
     notices = [
-        start_notice(event, groups)
+        start_notice(event)
         for event in sorted(events, key=lambda e: e.end)
         if event.start <= ts < event.end and event.end - event.start <= LONG
     ]
@@ -355,23 +354,8 @@ def live(events: list[Event], groups: list[Group], servants: dict[int, Servant],
     return notices
 
 
-def start_notice(event: Event, groups: list[Group], marks: list[Mark] | None = None) -> Notice:
-    return Notice(event_start(event), marks or [], event=event, fallbacks=named_banner_art(event, groups))
-
-
-def named_banner_art(event: Event, groups: list[Group]) -> tuple[str, ...]:
-    """Summon art of banners named after the event that run while it does, earliest first. The Grand
-    event's own banner is missing, but its Tamamo Aria banner, 「冠位名代戦」 タマモアリア, has the logo."""
-    banners = sorted(
-        (
-            b
-            for g in groups
-            for b in g.banners
-            if event.name in b.name and b.start < event.end and b.end > event.start and b.art
-        ),
-        key=lambda b: (b.start, b.id),
-    )
-    return tuple(dict.fromkeys(b.art for b in banners if b.art))
+def start_notice(event: Event, marks: list[Mark] | None = None) -> Notice:
+    return Notice(event_start(event), marks or [], event=event)
 
 
 def banner_notice(

@@ -281,20 +281,6 @@ def test_start_posts_carry_pictures_and_reminders_dont():
     assert reminder.image is None and reminder.event is None
 
 
-def test_banners_named_after_an_event_are_its_fallback_pictures():
-    grand = news.parse_events([event(80637, "冠位名代戦", T0, T0 + 7 * DAY)])[0]
-    groups = news.group_banners(news.parse_banners([
-        # the prep banners end before it starts: not its art
-        banner(1, "「冠位名代戦」準備応援 BBピックアップ召喚", T0 - 16 * DAY, T0 - 5 * 3600) | {"imageId": 1},
-        banner(3, "「冠位名代戦」 タマモアリアピックアップ召喚", T0, T0 + 19 * DAY) | {"imageId": 83847},
-        banner(2, "Halloween banner", T0, T0 + 7 * DAY) | {"imageId": 2},
-    ]))
-    assert news.named_banner_art(grand, groups) == (
-        "https://static.atlasacademy.io/JP/SummonBanners/img_summon_83847.png",
-    )
-    (notice,) = news.live([grand], [], SERVANTS, T0 + DAY)
-    assert notice.event == grand and notice.fallbacks == ()
-
 
 # --- the cog (fake guild and bot, real in-memory DB) ----------------------------------------
 
@@ -395,38 +381,41 @@ async def test_missing_pictures_fall_back_to_text(db):
     assert channel.files == [None] and "**New banner**" in channel.sent[0]
 
 
-TAMAMO_ART = "https://static.atlasacademy.io/JP/SummonBanners/img_summon_83847.png"
 GRAND_DUEL = "https://static.atlasacademy.io/JP/Banner/chaldea_category_80520.png"
 DEAD_BANNER = "https://static.atlasacademy.io/JP/Banner/event_war_80614.png"
+EVENT_PAGE_URL = news.EVENT_API.format(id=80637)
+RAID_WAR, GRAND_DUEL_WAR = news.WAR_API.format(id=8413), news.WAR_API.format(id=8395)
 
 
-def _grand_event_notice(fallbacks=(TAMAMO_ART,)):
+def _grand_event_notice():
     grand = news.parse_events([event(80637, "冠位名代戦", T0, T0 + 7 * DAY, wars=[8413])])[0]
-    return news.Notice("**Event started** · 冠位名代戦", event=grand, fallbacks=fallbacks)
+    return news.Notice("**Event started** · 冠位名代戦", event=grand)
 
 
-async def test_an_event_without_its_own_banner_uses_one_named_after_it():
+async def test_an_event_without_its_own_banner_uses_its_wars():
+    # Atlas as it is for the Grand event: its own banner is dead, its war (the raid) has the 冠位戴冠戦 strip
     http = _Http(
-        pages={news.EVENT_API.format(id=80637): {"banner": DEAD_BANNER},
-               news.WAR_API.format(id=8413): {"banner": GRAND_DUEL}},
-        pictures={TAMAMO_ART: PNG, GRAND_DUEL: PNG[:900]},
+        pages={EVENT_PAGE_URL: {"banner": DEAD_BANNER},
+               RAID_WAR: {"banner": GRAND_DUEL, "parentWarId": 8395}},
+        pictures={GRAND_DUEL: PNG[:900]},
     )
     cog = News(SimpleNamespace(http_client=http))
     notice = _grand_event_notice()
     await cog.add_details([notice])
-    assert notice.image == TAMAMO_ART
-    assert ("get", news.WAR_API.format(id=8413)) not in http.calls  # found before the war was needed
-    assert cog.send_kwargs(notice)["file"].filename == "img_summon_83847.png"
+    assert notice.image == GRAND_DUEL
+    assert ("get", GRAND_DUEL_WAR) not in http.calls  # found before going up another level
+    assert cog.send_kwargs(notice)["file"].filename == "chaldea_category_80520.png"
 
 
-async def test_then_its_wars_banner_then_nothing():
+async def test_then_the_war_above_it_then_nothing():
     http = _Http(
-        pages={news.EVENT_API.format(id=80637): {"banner": DEAD_BANNER},
-               news.WAR_API.format(id=8413): {"banner": GRAND_DUEL}},
+        pages={EVENT_PAGE_URL: {"banner": DEAD_BANNER},
+               RAID_WAR: {"banner": None, "parentWarId": 8395},
+               GRAND_DUEL_WAR: {"banner": GRAND_DUEL, "parentWarId": 0}},
         pictures={GRAND_DUEL: PNG[:900]},
     )
     cog = News(SimpleNamespace(http_client=http))
-    notice = _grand_event_notice()  # the Tamamo art is gone too
+    notice = _grand_event_notice()
     await cog.add_details([notice])
     assert notice.image == GRAND_DUEL
 
@@ -435,6 +424,17 @@ async def test_then_its_wars_banner_then_nothing():
     notice = _grand_event_notice()
     await cog.add_details([notice])
     assert notice.image is None and "file" not in cog.send_kwargs(notice)
+
+
+async def test_war_lookups_stop_after_two_levels():
+    # a chain of wars with no banners: BB looks at the event's war and the one above it, no further
+    http = _Http(pages={news.WAR_API.format(id=i): {"banner": None, "parentWarId": i + 1}
+                        for i in range(8413, 8420)})
+    cog = News(SimpleNamespace(http_client=http))
+    notice = _grand_event_notice()
+    await cog.add_details([notice])
+    wars = [url for kind, url in http.calls if "/war/" in url]
+    assert notice.image is None and wars == [RAID_WAR, news.WAR_API.format(id=8414)]
 
 
 async def test_pictures_too_big_to_upload_are_left_out(db, monkeypatch):

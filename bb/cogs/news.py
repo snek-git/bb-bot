@@ -13,10 +13,10 @@ recently, BB reads its war's quests and uses that date instead (see news.quest_e
 Event details: an event's own API page, fetched only when a start post needs it, gives its type (raid,
 box gacha, shop...) and free servant for the post, and its banner.
 
-Pictures: an event's banner comes from that page. Atlas lists
-some that don't exist (the Grand event's), so an event post falls back to the art of a banner named
-after the event, then to its war's banner. Pictures are downloaded and attached as files, as they are.
-A post with no working picture just goes out as text.
+Pictures: an event's banner comes from that page. Atlas lists some that don't exist (the Grand
+event's), so an event post goes up a level to its war's banner (for the Grand event, the 冠位戴冠戦
+strip), then to that war's parent's. Pictures are downloaded and attached as files, as they are. A post
+with no working picture just goes out as text.
 """
 
 from __future__ import annotations
@@ -42,6 +42,7 @@ CHECK_MINUTES = 15
 FETCH_ERRORS = (aiohttp.ClientError, TimeoutError, ValueError)
 MAX_PICTURE = 8 * 1024 * 1024  # well under Discord's upload limit; summon art is about 1 MB
 REAL_END_TTL = 6 * 3600.0  # how long a looked-up end date is trusted (Atlas may extend an event)
+WAR_LEVELS = 2  # how far up from an event's war BB looks for a picture: the war, then the one above it
 
 
 @dataclass
@@ -58,7 +59,7 @@ class News(commands.Cog):
         self._raw: dict[str, Any] = {}
         self.data: Data | None = None
         self._event_pages: dict[int, news.EventPage] = {}  # event id -> its banner, type and free servants
-        self._war_art: dict[int, str | None] = {}  # war id -> its banner picture
+        self._wars: dict[int, tuple[str | None, int]] = {}  # war id -> (its banner, the war above it)
         self._pictures: dict[str, bytes | None] = {}  # picture URL -> its bytes (None: it doesn't exist)
         self._real_ends: dict[int, tuple[float, float | None]] = {}  # event id -> (looked up at, end)
 
@@ -186,30 +187,32 @@ class News(commands.Cog):
         self._pictures[url] = data
         return data
 
-    async def war_art(self, war_id: int) -> str | None:
-        """The war's banner: for the Grand event, the 冠位戴冠戦 Grand Duel strip it sits under."""
-        if war_id in self._war_art:
-            return self._war_art[war_id]
+    async def war(self, war_id: int) -> tuple[str | None, int]:
+        """The war's banner and the war it sits under (0: none). For the Grand event's war that's the
+        冠位戴冠戦 strip, under 冠位戴冠戦. A failed lookup isn't remembered."""
+        if war_id in self._wars:
+            return self._wars[war_id]
         try:
             body = await self._get_json(news.WAR_API.format(id=war_id))
         except FETCH_ERRORS as exc:
             log.info("news: couldn't look up war %s: %r", war_id, exc)
-            return None
-        art = body.get("banner") or None
-        self._war_art[war_id] = art
-        return art
+            return None, 0
+        self._wars[war_id] = (body.get("banner") or None, int(body.get("parentWarId") or 0))
+        return self._wars[war_id]
 
     async def _event_pictures(
         self, notice: news.Notice, page: news.EventPage | None
     ) -> AsyncIterator[str | None]:
-        """An event post's pictures, best first: its own banner, banners named after it, its war's banner.
-        Each is looked up only if the ones before it are missing."""
+        """An event post's pictures, best first: its own banner, then a level up at a time, its war's and
+        that war's parent's. Each is looked up only if the ones before it are missing."""
         assert notice.event is not None
         yield page.art if page else None
-        for url in notice.fallbacks:
-            yield url
         for war_id in notice.event.war_ids:
-            yield await self.war_art(war_id)
+            for _ in range(WAR_LEVELS):
+                art, war_id = await self.war(war_id)
+                yield art
+                if not war_id:
+                    break
 
     async def add_details(self, notices: list[news.Notice]) -> None:
         """What the exports don't have, in place: an event post's type and free servant, and every post's
