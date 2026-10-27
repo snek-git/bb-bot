@@ -1,4 +1,5 @@
-"""Pings: when someone @-mentions BB without posting a supported link, she answers ("help" or a ping line)."""
+"""Pings: when someone @-mentions BB without posting a supported link, she answers ("help" or a ping line).
+"@BB gre new" gets what's running in FGO JP right now, in the news post format, in that channel."""
 
 from __future__ import annotations
 
@@ -10,7 +11,7 @@ from typing import Any
 import discord
 from discord.ext import commands
 
-from bb import strings
+from bb import news, strings
 from bb.cogs.findsource import pick_image_url
 from bb.cogs.linkfix import is_history
 from bb.cooldown import Cooldown
@@ -19,6 +20,7 @@ from bb.links import extract, resolve, sites
 log = logging.getLogger(__name__)
 
 _HELP = re.compile(r"\bhelp\b", re.IGNORECASE)
+_NEWS = re.compile(r"\bgre news?\b", re.IGNORECASE)  # "gre new": what the server calls FGO news
 
 
 def pings_bot(content: str, bot_id: int) -> bool:
@@ -28,6 +30,10 @@ def pings_bot(content: str, bot_id: int) -> bool:
 
 def wants_help(content: str) -> bool:
     return _HELP.search(content) is not None
+
+
+def wants_news(content: str) -> bool:
+    return _NEWS.search(content) is not None
 
 
 def reply_key(content: str) -> str:
@@ -69,6 +75,9 @@ class Chat(commands.Cog):
         settings = await self.bot.settings.get(message.guild.id)
         if settings.paused or not settings.channel_enabled(settings_channel_id(message.channel)):
             return
+        if wants_news(message.content):
+            await self.post_news(message)
+            return
         image_url = await self.image_to_search(message)
         if image_url is not None:
             await self.find_source(message, image_url)
@@ -105,6 +114,30 @@ class Chat(commands.Cog):
             except discord.HTTPException:
                 return None
         return pick_image_url(target.attachments, target.embeds)
+
+    async def post_news(self, message: discord.Message) -> None:
+        """What's running in FGO JP right now, the same posts as "What's on now" in /settings, with their
+        pictures. The first one replies to the ping; the rest follow in the channel."""
+        if not self.cooldown.ready(message.author.id):
+            return
+        none = discord.AllowedMentions.none()
+        feed = self.bot.get_cog("News")
+        notices = feed.live(time.time()) if feed is not None else None
+        try:
+            if notices is None:
+                await message.reply(strings.line("news.no_data"), mention_author=False, allowed_mentions=none)
+                return
+            if not notices:
+                await message.reply(strings.line("news.nothing"), mention_author=False, allowed_mentions=none)
+                return
+            async with message.channel.typing():
+                await feed.add_details(notices)
+            first, *rest = news.messages(notices)
+            await message.reply(mention_author=False, **feed.send_kwargs(first))
+            for item in rest:
+                await message.channel.send(**feed.send_kwargs(item))
+        except discord.HTTPException as exc:
+            log.debug("news reply failed: %r", exc)
 
     async def find_source(self, message: discord.Message, image_url: str) -> None:
         finder = self.bot.get_cog("FindSource")

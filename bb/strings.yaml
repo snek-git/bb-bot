@@ -118,7 +118,7 @@ ping:
 help:
   vars: [skip_word]
   lines:
-    - "Post a link and BB fixes it. Put `{skip_word}` in it and I'll ignore you. The buttons under my posts do the rest. Simple enough even for you, Senpai♡"
+    - "Post a link and BB fixes it. Put `{skip_word}` in it and I'll ignore you. The buttons under my posts do the rest. Ping me with `gre new` and I'll tell you what's on in FGO. Simple enough even for you, Senpai♡"
 
 
 

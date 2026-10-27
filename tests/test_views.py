@@ -539,6 +539,56 @@ async def test_chat_ignores_old_and_paused(db, fake_links):
 
 
 
+def test_news_trigger():
+    assert chat.wants_news("<@99> gre new") and chat.wants_news("<@99> GRE NEWS pls")
+    assert not chat.wants_news("<@99> news") and not chat.wants_news("<@99> green")
+
+
+class _Feed:
+    """The news cog as chat sees it."""
+
+    def __init__(self, live):
+        self._live, self.details = live, AsyncMock()
+
+    def live(self, ts):
+        return self._live
+
+    async def add_details(self, notices):
+        await self.details(notices)
+        notices[0].image = "art.png"
+
+    def send_kwargs(self, message):
+        return {"content": message.text, "file": message.image}
+
+
+def _news_bot(store, feed):
+    return SimpleNamespace(
+        user=SimpleNamespace(id=99), settings=store, http_client=None,
+        get_cog=lambda name: feed if name == "News" else None,
+    )
+
+
+async def test_gre_new_posts_whats_on_in_the_channel(db, fake_links):
+    from bb import news
+
+    feed = _Feed([news.Notice("**Event started** · A"), news.Notice("**New banner** · B", image="b.png")])
+    message = make_chat_message("<@99> gre new")
+    message.channel.send = AsyncMock()
+    await chat.Chat(_news_bot(SettingsStore(db), feed)).on_message(message)
+    first = message.reply.await_args.kwargs
+    assert first["content"] == "**Event started** · A" and first["file"] == "art.png"
+    assert message.channel.send.await_args.kwargs == {"content": "**New banner** · B", "file": "b.png"}
+
+
+async def test_gre_new_with_nothing_on_or_no_data(db, fake_links):
+    message = make_chat_message("<@99> gre new")
+    await chat.Chat(_news_bot(SettingsStore(db), _Feed([]))).on_message(message)
+    assert message.reply.await_args.args[0] in strings.variants("news.nothing")
+    message = make_chat_message("<@99> gre new", author_id=4)
+    await chat.Chat(_news_bot(SettingsStore(db), _Feed(None))).on_message(message)
+    assert message.reply.await_args.args[0] in strings.variants("news.no_data")
+
+
 def _finder():
     finder = SimpleNamespace(answer=AsyncMock(return_value=("- [Danbooru](<https://d/1>) 90%", "VIEW")))
     return finder
