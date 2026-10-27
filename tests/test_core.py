@@ -211,7 +211,7 @@ async def test_version_one_database_gets_the_media_column(tmp_path):
     _as_version_one(path, 1)
     second = Database(str(path))
     await second.connect()
-    assert await _user_version(second) == 2
+    assert await _user_version(second) == dbmod.SCHEMA_VERSION
     row = await second.get_repost(1)
     assert row is not None and row.media == "" and row.canonical_key == "twitter:5"
     await second.close()

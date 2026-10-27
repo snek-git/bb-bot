@@ -135,7 +135,6 @@ One of the most famous and funniest incidents in the server: someone had a meltd
 - **Most-posted servant of the week.** Look up each art link on Danbooru by its source URL to get character tags (tested and working). This also powers "@BB show me Okita".
 - **Guess the servant.** Cropped art or a voice line from Atlas Academy; first correct answer in chat scores. Needs a nickname table.
 - **Real-banner gacha simulator** (the "roll" idea postponed early on).
-- **"Last day of the banner" posts** in a news channel, from Atlas event data.
 - **Keeping copies of art** from fixed links, re-posted when the tweet is deleted. Images only.
 - **One-time import of old messages,** so roasts and stats have history from day one. It must be a separate script that only reads Discord and writes the database, and can never send.
 - **Weekly report extras:** most-used custom emoji, and the most-reacted post of the week.

@@ -386,6 +386,39 @@ async def test_roundup_preview_is_private(panel):
     assert kwargs["embed"] is embed and kwargs["ephemeral"] is True
 
 
+async def test_news_section_and_private_preview(panel):
+    from bb import news
+
+    panel.section = "news"
+    panel.rebuild()
+    await click(panel, find(panel, panel_mod.SetButton, field="news_channel_id"))
+    assert "goes to: off" in panel_mod.describe("news", panel.settings)
+
+    async def add_images(notices):
+        notices[0].image = "https://x/art.png"
+
+    def preview(live):
+        panel.bot.get_cog = lambda name: SimpleNamespace(live=lambda ts: live, add_images=add_images)
+        interaction = SimpleNamespace(
+            user=SimpleNamespace(id=7),
+            response=SimpleNamespace(defer=AsyncMock()),
+            followup=SimpleNamespace(send=AsyncMock()),
+        )
+        return interaction
+
+    interaction = preview([news.Notice("**New banner** · X")])
+    await find(panel, panel_mod.NewsPreviewButton).callback(interaction)
+    assert interaction.response.defer.await_args.kwargs["ephemeral"] is True
+    title, item = [call.kwargs for call in interaction.followup.send.await_args_list]
+    assert title["ephemeral"] and "Only you can see this" in title["content"]
+    assert item["ephemeral"] and item["content"] == "**New banner** · X"
+    assert item["embed"].image.url == "https://x/art.png"
+
+    interaction = preview(None)  # nothing fetched yet
+    await find(panel, panel_mod.NewsPreviewButton).callback(interaction)
+    assert "hasn't got the FGO data" in interaction.followup.send.await_args.kwargs["content"]
+
+
 async def test_pause_switch(panel):
     panel.section = "status"
     panel.rebuild()

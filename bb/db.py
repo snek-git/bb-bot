@@ -75,14 +75,24 @@ CREATE TABLE IF NOT EXISTS fixer_health (
     last_checked         REAL    NOT NULL,
     last_change          REAL    NOT NULL
 );
+
+-- FGO news already posted per server: item_key is "event:<id>" or "banner:<id>", phase start|soon|last.
+CREATE TABLE IF NOT EXISTS news_posted (
+    guild_id  INTEGER NOT NULL,
+    item_key  TEXT    NOT NULL,
+    phase     TEXT    NOT NULL,
+    posted_at REAL    NOT NULL,
+    PRIMARY KEY (guild_id, item_key, phase)
+);
 """
 
 
 # Bump SCHEMA_VERSION with every schema change: put the change in SCHEMA (new databases) and the
 # step that takes an existing database there in MIGRATIONS[new version].
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MIGRATIONS: dict[int, str] = {
     2: "ALTER TABLE reposts ADD COLUMN media TEXT NOT NULL DEFAULT '';",
+    3: "",  # the news_posted table: a new table only, which SCHEMA creates
 }
 
 
@@ -391,6 +401,22 @@ class Database:
             (guild_id, since, limit),
         )
         return [(row["offender_id"], row["offender_name"], row["n"]) for row in rows]
+
+    # --- FGO news -------------------------------------------------------------------------
+
+    async def news_posted(self, guild_id: int) -> set[tuple[str, str]]:
+        rows = await self._fetchall("SELECT item_key, phase FROM news_posted WHERE guild_id = ?", (guild_id,))
+        return {(row["item_key"], row["phase"]) for row in rows}
+
+    async def mark_news_posted(
+        self, guild_id: int, marks: list[tuple[str, str]], posted_at: float | None = None
+    ) -> None:
+        ts = now() if posted_at is None else posted_at
+        await self.conn.executemany(
+            "INSERT OR IGNORE INTO news_posted (guild_id, item_key, phase, posted_at) VALUES (?, ?, ?, ?)",
+            [(guild_id, key, phase, ts) for key, phase in marks],
+        )
+        await self.conn.commit()
 
     # --- fixer health ---------------------------------------------------------------------
 

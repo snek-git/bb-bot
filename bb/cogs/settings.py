@@ -15,8 +15,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bb import strings
+from bb import news, strings
 from bb.cogs.linkfix import rare_line
+from bb.cogs.news import send_kwargs
 from bb.links import sites
 from bb.settings_store import MAX_RARE_LINES, SITE_IDS, GuildSettings, RareLine
 from bb.timeutil import now, zone
@@ -36,6 +37,7 @@ SECTIONS: tuple[tuple[str, str], ...] = (
     ("webhooks", "Webhooks"),
     ("roundup", "Roundup"),
     ("alerts", "Alerts channel"),
+    ("news", "FGO news"),
     ("skip", "Skip word"),
     ("translation", "Translation language"),
     ("timezone", "Timezone"),
@@ -222,6 +224,11 @@ def describe(
         )
     if section == "alerts":
         return f"Fixer alerts go to: {_channel(s.alerts_channel_id)}"
+    if section == "news":
+        return (
+            f"FGO JP news goes to: {_channel(s.news_channel_id)}\n"
+            "-# New events and banners as they open, then a reminder 2 days and 1 day before they end."
+        )
     if section == "skip":
         return f"Messages containing `{s.skip_word}` are ignored."
     if section == "translation":
@@ -481,6 +488,27 @@ class RoundupPreviewButton(_Item, discord.ui.Button):
         )
 
 
+class NewsPreviewButton(_Item, discord.ui.Button):
+    """What's running in FGO JP right now, in the news format, privately: nothing is posted or recorded."""
+
+    def __init__(self, row: int) -> None:
+        super().__init__(label="What's on now", style=discord.ButtonStyle.secondary, row=row)
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        # Looking up the pictures can take longer than Discord's 3 seconds to answer.
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        cog = self.panel.bot.get_cog("News")
+        notices = cog.live(now()) if cog is not None else None
+        if notices is None:
+            notices = [news.Notice(strings.line("news.no_data"))]
+        else:
+            await cog.add_images(notices)
+            notices = notices or [news.Notice(strings.line("news.nothing"))]
+            notices.insert(0, news.Notice(strings.line("news.preview_title")))
+        for message in news.messages(notices):
+            await interaction.followup.send(ephemeral=True, **send_kwargs(message))
+
+
 class SetButton(_Item, discord.ui.Button):
     """Sets a field to a fixed value (e.g. 'Turn off' clears a channel)."""
 
@@ -675,6 +703,22 @@ def _build_alerts(p: SettingsPanel) -> None:
     p.add_item(SetButton("alerts_channel_id", None, "Turn off", row=2, disabled=s.alerts_channel_id is None))
 
 
+def _build_news(p: SettingsPanel) -> None:
+    s = p.settings
+    p.add_item(
+        ChannelPicker(
+            "news_channel_id",
+            p.existing([s.news_channel_id]),
+            multi=False,
+            types=_TEXT_CHANNELS,
+            placeholder="News channel",
+            row=1,
+        )
+    )
+    p.add_item(SetButton("news_channel_id", None, "Turn off", row=2, disabled=s.news_channel_id is None))
+    p.add_item(NewsPreviewButton(row=2))
+
+
 def _build_skip(p: SettingsPanel) -> None:
     p.add_item(
         ModalButton(
@@ -745,6 +789,7 @@ BUILDERS: dict[str, Callable[[SettingsPanel], None]] = {
     "webhooks": _build_webhooks,
     "roundup": _build_roundup,
     "alerts": _build_alerts,
+    "news": _build_news,
     "skip": _build_skip,
     "translation": _build_translation,
     "timezone": _build_timezone,

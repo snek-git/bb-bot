@@ -1,0 +1,193 @@
+"""FGO JP news: every few minutes, check Atlas Academy's data and post new events, new banners and
+end reminders to each server's news channel. What to post is decided in bb/news.py.
+
+The exports are fetched once per check for all servers, with their ETag, so an unchanged file costs a
+304 and no parsing. Each server records what it was sent, so a restart or a new server never repeats
+anything, and a channel set today only gets what is new from now on (plus what started in the last
+news.FRESH seconds).
+
+Pictures: an event's banner comes from its own API page, fetched only when a post needs it. Every
+picture is checked before it's used (Atlas lists some that don't exist), and a post whose picture is
+missing just goes out as text.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any
+
+import aiohttp
+import discord
+from discord.ext import commands, tasks
+
+from bb import news, render
+from bb.timeutil import now
+
+log = logging.getLogger(__name__)
+
+CHECK_MINUTES = 15
+FETCH_ERRORS = (aiohttp.ClientError, TimeoutError, ValueError)
+BB_PURPLE = discord.Colour(render.BB_PURPLE)
+
+
+def send_kwargs(message: news.Notice) -> dict[str, Any]:
+    """channel.send / followup.send arguments: the text, and the picture as an embed under it."""
+    kwargs: dict[str, Any] = {"content": message.text, "allowed_mentions": discord.AllowedMentions.none()}
+    if message.image:
+        kwargs["embed"] = discord.Embed(colour=BB_PURPLE).set_image(url=message.image)
+    return kwargs
+
+
+@dataclass
+class Data:
+    events: list[news.Event]
+    groups: list[news.Group]
+    servants: dict[int, news.Servant]
+
+
+class News(commands.Cog):
+    def __init__(self, bot: Any) -> None:
+        self.bot = bot
+        self._etags: dict[str, str] = {}
+        self._raw: dict[str, Any] = {}
+        self.data: Data | None = None
+        self._event_art: dict[int, str | None] = {}  # event id -> its banner picture (None: it has none)
+        self._reachable: dict[str, bool] = {}  # picture URL -> whether it exists
+
+    async def cog_load(self) -> None:
+        self.tick.start()
+
+    async def cog_unload(self) -> None:
+        self.tick.cancel()
+
+    @tasks.loop(minutes=CHECK_MINUTES)
+    async def tick(self) -> None:
+        try:
+            await self.refresh()
+        except Exception:  # a changed export format must not stop the loop for good
+            log.exception("news: couldn't read the Atlas Academy data")
+        if self.data is None:
+            return
+        ts = now()  # with old data after a failed refresh: end times don't move, reminders stay right
+        for guild in list(self.bot.guilds):
+            try:
+                await self.post_due(guild, ts)
+            except Exception:
+                log.exception("news: failed for guild %s", guild.id)
+
+    @tick.before_loop
+    async def _before_tick(self) -> None:
+        await self.bot.wait_until_ready()
+
+    async def _fetch(self, url: str) -> Any:
+        """The export's JSON, or the copy from last time when it hasn't changed (HTTP 304)."""
+        headers = {"If-None-Match": self._etags[url]} if url in self._raw and url in self._etags else {}
+        async with self.bot.http_client.get(url, headers=headers) as resp:
+            if resp.status == 304:
+                return self._raw[url]
+            resp.raise_for_status()
+            body = await resp.json(content_type=None)
+            self._raw[url] = body
+            if etag := resp.headers.get("ETag"):
+                self._etags[url] = etag
+            return body
+
+    async def refresh(self) -> bool:
+        """Fetch the exports and rebuild self.data. False (and the old data kept) if any fetch failed."""
+        try:
+            events = await self._fetch(news.EVENTS_URL)
+            banners = await self._fetch(news.BANNERS_URL)
+            servants = await self._fetch(news.SERVANTS_URL)
+        except FETCH_ERRORS as exc:
+            log.warning("news: couldn't fetch Atlas Academy data: %r", exc)
+            return False
+        self.data = Data(
+            news.parse_events(events),
+            news.group_banners(news.parse_banners(banners)),
+            news.parse_servants(servants),
+        )
+        return True
+
+    async def event_art(self, event_id: int) -> str | None:
+        """The event's banner picture. A failed lookup isn't remembered, so the next post tries again."""
+        if event_id in self._event_art:
+            return self._event_art[event_id]
+        try:
+            async with self.bot.http_client.get(news.EVENT_API.format(id=event_id)) as resp:
+                resp.raise_for_status()
+                body = await resp.json(content_type=None)
+        except FETCH_ERRORS as exc:
+            log.info("news: couldn't look up event %s: %r", event_id, exc)
+            return None
+        art = body.get("banner") or body.get("noticeBanner") or None
+        self._event_art[event_id] = art
+        return art
+
+    async def reachable(self, url: str) -> bool:
+        if url in self._reachable:
+            return self._reachable[url]
+        try:
+            async with self.bot.http_client.head(url) as resp:
+                ok = resp.status == 200 and resp.headers.get("Content-Type", "").startswith("image/")
+        except FETCH_ERRORS as exc:
+            log.info("news: couldn't check picture %s: %r", url, exc)
+            return False
+        self._reachable[url] = ok
+        return ok
+
+    async def add_images(self, notices: list[news.Notice]) -> None:
+        """Fill in event banners and drop pictures that don't exist, in place."""
+        for notice in notices:
+            if notice.event_id is not None and notice.image is None:
+                notice.image = await self.event_art(notice.event_id)
+            if notice.image and not await self.reachable(notice.image):
+                notice.image = None
+
+    def live(self, ts: float) -> list[news.Notice] | None:
+        """What's running right now (the /settings preview); None before the first fetch."""
+        if self.data is None:
+            return None
+        return news.live(self.data.events, self.data.groups, self.data.servants, ts)
+
+    async def post_due(self, guild: Any, ts: float) -> int:
+        """Post this server's news if anything is due. Returns how many messages were sent."""
+        s = await self.bot.settings.get(guild.id)
+        if s.paused or not s.news_channel_id or self.data is None:
+            return 0
+        done = await self.bot.db.news_posted(guild.id)
+        due = news.due(self.data.events, self.data.groups, self.data.servants, ts, done)
+        if not due:
+            return 0
+        channel = guild.get_channel_or_thread(s.news_channel_id)
+        if channel is None:
+            try:
+                channel = await guild.fetch_channel(s.news_channel_id)
+            except (discord.NotFound, discord.Forbidden):
+                channel = None
+        if channel is None or not hasattr(channel, "send"):
+            # Skipped, not kept for later: news days late is no news.
+            log.warning("news: channel %s unusable in guild %s, skipping", s.news_channel_id, guild.id)
+            await self.bot.db.mark_news_posted(guild.id, [m for n in due for m in n.marks], ts)
+            return 0
+
+        await self.add_images(due)
+        sent = 0
+        for message in news.messages(due):
+            try:
+                await channel.send(**send_kwargs(message))
+            except (discord.Forbidden, discord.NotFound) as exc:
+                log.warning("news: can't post in guild %s: %s", guild.id, exc)
+            except discord.HTTPException as exc:
+                log.warning("news: send failed in guild %s, retrying next check: %s", guild.id, exc)
+                return sent
+            else:
+                sent += 1
+            await self.bot.db.mark_news_posted(guild.id, message.marks, ts)
+        if sent:
+            log.info("news: posted %d message(s) in guild %s", sent, guild.id)
+        return sent
+
+
+async def setup(bot: commands.Bot) -> None:
+    await bot.add_cog(News(bot))

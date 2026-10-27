@@ -14,6 +14,7 @@ What she does:
 - Checks every fixer every 10 minutes and tells admins when one breaks or comes back
 - Rotating status text with the number of links fixed in the last 24 hours
 - A weekly roundup: top poster, top site, and the Buster Brainlet of the week
+- FGO JP news from Atlas Academy's data: new events and banners (with their pickups and banner art), and text-only reminders 2 days and 1 day before they end
 - `/settings`, visible only to members with Manage Server
 
 The idea comes from [FixTweetBot](https://github.com/Kyrela/FixTweetBot) (MIT + Commons Clause). BB is a fresh rewrite and shares no code with it.
@@ -121,6 +122,7 @@ can't touch it) and keeps the newest 14. Restore by stopping BB and copying a ba
 Everything is in `/settings` (Manage Server only). Worth doing right away:
 
 - **Alerts channel**: where she reports fixers going down and coming back. No channel, no alerts.
+- **FGO news**: the channel for FGO JP news. It's off until a channel is set. BB checks every 15 minutes and posts only what's new from then on, plus anything that started in the last 2 days. "What's on now" shows you privately what's running.
 - **Roundup**: channel, weekday, hour, and whether to award Buster Brainlet. The roundup uses the server's **timezone** setting. It's off until a channel is set, and the first one goes out at the next scheduled slot. If BB is offline at that hour she still posts it if she's back within 12 hours; otherwise that week is skipped.
 
 ## Development
@@ -166,3 +168,4 @@ Run through this in a test server (set `DEV_GUILD_ID` so commands show up instan
 - [ ] The status text appears under BB's name and changes every 30 minutes.
 - [ ] Roundup: set the roundup channel with the weekday and hour set to the current hour (in the server's timezone). Within 5 minutes the weekly report appears, once; restarting her doesn't post it again.
 - [ ] Ping BB with no link: she answers. Ping her with "help": she explains herself.
+- [ ] FGO news: set a news channel, then click "What's on now": the current JP events and banners show up privately, with end times in your own timezone.

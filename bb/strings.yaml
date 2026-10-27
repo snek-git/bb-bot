@@ -198,6 +198,69 @@ roundup.quiet:
   lines:
     - "Nobody posted anything this week. Did you all forget about me? Unforgivable♡"
 
+# FGO JP news (cogs/news.py). Plain on purpose: people read these for the facts.
+# {name} is a linked event name or a banner group; {when} and {left} are Discord timestamps.
+news.event_start:
+  vars: [name]
+  lines:
+    - "**Event started** · {name}"
+
+news.rerun_start:
+  vars: [name]
+  lines:
+    - "**Rerun started** · {name}"
+
+# Story chapters, the Grand event and other content with no real end date.
+news.new_content:
+  vars: [name]
+  lines:
+    - "**Now open** · {name}"
+
+news.banner:
+  vars: [title]
+  lines:
+    - "**New banner** · {title}"
+
+news.rerun_banner:
+  vars: [title]
+  lines:
+    - "**Rerun banner** · {title}"
+
+news.banner_group:
+  vars: [title, banners]  # banners is "banner" or "banners (12)"
+  lines:
+    - "{title} {banners}"
+
+news.two_days:
+  vars: [name]
+  lines:
+    - "**2 days left** · {name}"
+
+news.last_day:
+  vars: [name]
+  lines:
+    - "**Last day** · {name}"
+
+news.ends:
+  vars: [when, left]
+  lines:
+    - "-# Ends {when} ({left})"
+
+news.preview_title:
+  vars: []
+  lines:
+    - "Live in FGO JP right now. Only you can see this."
+
+news.nothing:
+  vars: []
+  lines:
+    - "Nothing is running right now."
+
+news.no_data:
+  vars: []
+  lines:
+    - "BB hasn't got the FGO data yet. Try again in a minute, Senpai."
+
 settings.title:
   vars: []
   lines:

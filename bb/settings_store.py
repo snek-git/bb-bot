@@ -67,6 +67,8 @@ class GuildSettings:
     roundup_last_sent: float = 0.0  # set by the roundup cog, not shown in /settings
     # Admin alerts
     alerts_channel_id: int | None = None
+    # FGO JP news (new events and banners, end reminders). Off until a channel is set.
+    news_channel_id: int | None = None
     # Misc
     skip_word: str = "nobb"
     translate_lang: str = "en"
