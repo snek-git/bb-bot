@@ -274,11 +274,26 @@ def test_start_posts_carry_pictures_and_reminders_dont():
                banner(11, COLLAB + "Bピックアップ召喚", T0, end, [2]) | {"imageId": 83839}]
     ev = event(80632, "復刻版:盈月剣風帖", T0, end)
     first, second = run([ev], banners)
-    assert first.event_id == 80632 and first.image is None  # the cog looks the event's banner up
+    assert first.event.id == 80632 and first.image is None  # the cog looks the event's banner up
     assert second.image == "https://static.atlasacademy.io/JP/SummonBanners/img_summon_83838.png"
     done = {("event:80632", START), ("banner:10", START), ("banner:11", START)}
     (reminder,) = run([ev], banners, ts=end - DAY + 60, done=done)
-    assert reminder.image is None and reminder.event_id is None
+    assert reminder.image is None and reminder.event is None
+
+
+def test_banners_named_after_an_event_are_its_fallback_pictures():
+    grand = news.parse_events([event(80637, "冠位名代戦", T0, T0 + 7 * DAY)])[0]
+    groups = news.group_banners(news.parse_banners([
+        # the prep banners end before it starts: not its art
+        banner(1, "「冠位名代戦」準備応援 BBピックアップ召喚", T0 - 16 * DAY, T0 - 5 * 3600) | {"imageId": 1},
+        banner(3, "「冠位名代戦」 タマモアリアピックアップ召喚", T0, T0 + 19 * DAY) | {"imageId": 83847},
+        banner(2, "Halloween banner", T0, T0 + 7 * DAY) | {"imageId": 2},
+    ]))
+    assert news.named_banner_art(grand, groups) == (
+        "https://static.atlasacademy.io/JP/SummonBanners/img_summon_83847.png",
+    )
+    (notice,) = news.live([grand], [], SERVANTS, T0 + DAY)
+    assert notice.event == grand and notice.fallbacks == ()
 
 
 # --- the cog (fake guild and bot, real in-memory DB) ----------------------------------------
@@ -378,6 +393,48 @@ async def test_missing_pictures_fall_back_to_text(db):
     channel = _Channel()
     assert await cog.post_due(_guild(channel), T0) == 1
     assert channel.files == [None] and "**New banner**" in channel.sent[0]
+
+
+TAMAMO_ART = "https://static.atlasacademy.io/JP/SummonBanners/img_summon_83847.png"
+GRAND_DUEL = "https://static.atlasacademy.io/JP/Banner/chaldea_category_80520.png"
+DEAD_BANNER = "https://static.atlasacademy.io/JP/Banner/event_war_80614.png"
+
+
+def _grand_event_notice(fallbacks=(TAMAMO_ART,)):
+    grand = news.parse_events([event(80637, "冠位名代戦", T0, T0 + 7 * DAY, wars=[8413])])[0]
+    return news.Notice("**Event started** · 冠位名代戦", event=grand, fallbacks=fallbacks)
+
+
+async def test_an_event_without_its_own_banner_uses_one_named_after_it():
+    http = _Http(
+        pages={news.EVENT_API.format(id=80637): {"banner": DEAD_BANNER},
+               news.WAR_API.format(id=8413): {"banner": GRAND_DUEL}},
+        pictures={TAMAMO_ART: PNG, GRAND_DUEL: PNG[:900]},
+    )
+    cog = News(SimpleNamespace(http_client=http))
+    notice = _grand_event_notice()
+    await cog.add_images([notice])
+    assert notice.image == TAMAMO_ART
+    assert ("get", news.WAR_API.format(id=8413)) not in http.calls  # found before the war was needed
+    assert cog.send_kwargs(notice)["file"].filename == "img_summon_83847.png"
+
+
+async def test_then_its_wars_banner_then_nothing():
+    http = _Http(
+        pages={news.EVENT_API.format(id=80637): {"banner": DEAD_BANNER},
+               news.WAR_API.format(id=8413): {"banner": GRAND_DUEL}},
+        pictures={GRAND_DUEL: PNG[:900]},
+    )
+    cog = News(SimpleNamespace(http_client=http))
+    notice = _grand_event_notice()  # the Tamamo art is gone too
+    await cog.add_images([notice])
+    assert notice.image == GRAND_DUEL
+
+    http.pictures.clear()
+    cog = News(SimpleNamespace(http_client=http))
+    notice = _grand_event_notice()
+    await cog.add_images([notice])
+    assert notice.image is None and "file" not in cog.send_kwargs(notice)
 
 
 async def test_pictures_too_big_to_upload_are_left_out(db, monkeypatch):

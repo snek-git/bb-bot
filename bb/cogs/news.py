@@ -10,9 +10,10 @@ Real end dates: some limited events (the Grand event, for one) are listed as run
 placeholder date years away. Their quests close on the real date, so for each such event that started
 recently, BB reads its war's quests and uses that date instead (see news.quest_end).
 
-Pictures: an event's banner comes from its own API page, fetched only when a post needs it. Pictures
-are downloaded and attached as files, as they are. A post whose picture is missing (Atlas lists some
-that don't exist) just goes out as text.
+Pictures: an event's banner comes from its own API page, fetched only when a post needs it. Atlas lists
+some that don't exist (the Grand event's), so an event post falls back to the art of a banner named
+after the event, then to its war's banner. Pictures are downloaded and attached as files, as they are.
+A post with no working picture just goes out as text.
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ from __future__ import annotations
 import io
 import logging
 import posixpath
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from typing import Any
 from urllib.parse import urlsplit
@@ -53,6 +55,7 @@ class News(commands.Cog):
         self._raw: dict[str, Any] = {}
         self.data: Data | None = None
         self._event_art: dict[int, str | None] = {}  # event id -> its banner picture (None: it has none)
+        self._war_art: dict[int, str | None] = {}  # war id -> its banner picture
         self._pictures: dict[str, bytes | None] = {}  # picture URL -> its bytes (None: it doesn't exist)
         self._real_ends: dict[int, tuple[float, float | None]] = {}  # event id -> (looked up at, end)
 
@@ -180,12 +183,38 @@ class News(commands.Cog):
         self._pictures[url] = data
         return data
 
+    async def war_art(self, war_id: int) -> str | None:
+        """The war's banner: for the Grand event, the 冠位戴冠戦 Grand Duel strip it sits under."""
+        if war_id in self._war_art:
+            return self._war_art[war_id]
+        try:
+            body = await self._get_json(news.WAR_API.format(id=war_id))
+        except FETCH_ERRORS as exc:
+            log.info("news: couldn't look up war %s: %r", war_id, exc)
+            return None
+        art = body.get("banner") or None
+        self._war_art[war_id] = art
+        return art
+
+    async def _event_pictures(self, notice: news.Notice) -> AsyncIterator[str | None]:
+        """An event post's pictures, best first: its own banner, banners named after it, its war's banner.
+        Each is looked up only if the ones before it are missing."""
+        assert notice.event is not None
+        yield await self.event_art(notice.event.id)
+        for url in notice.fallbacks:
+            yield url
+        for war_id in notice.event.war_ids:
+            yield await self.war_art(war_id)
+
     async def add_images(self, notices: list[news.Notice]) -> None:
-        """Fill in event banners and download every picture, in place; missing pictures are dropped."""
+        """Pick and download every post's picture, in place; a post with no working picture gets none."""
         for notice in notices:
-            if notice.event_id is not None and notice.image is None:
-                notice.image = await self.event_art(notice.event_id)
-            if notice.image and await self.picture(notice.image) is None:
+            if notice.event is not None and notice.image is None:
+                async for url in self._event_pictures(notice):
+                    if url and await self.picture(url) is not None:
+                        notice.image = url
+                        break
+            elif notice.image and await self.picture(notice.image) is None:
                 notice.image = None
 
     def send_kwargs(self, message: news.Notice) -> dict[str, Any]:
