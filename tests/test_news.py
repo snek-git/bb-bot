@@ -282,13 +282,71 @@ def test_start_posts_carry_pictures_and_reminders_dont():
 
 
 
+def _article(day, title, href):
+    return (f'<li>\n  <p class="date new">{day}</p>\n  <p class="title">{title}</p>\n'
+            f'  <a href="{href}"></a>\n  <svg class="arrow_icon"></svg>\n</li>\n')
+
+
+# The official news list as it was on 2026-10-28, trimmed to the articles that matter here.
+OFFICIAL = '<ul class="list_news">' + "".join([
+    _article("2026.10.28", "【予告】「ぐだぐだイベント2026」開幕予定！", "/2026/10/2026gudaguda/"),
+    _article("2026.10.23", "「冠位名代戦：タマモアリア」開幕！", "/2026/10/grand_substitute/"),
+    _article("2026.10.23", "【期間限定】『「冠位名代戦」 タマモアリアピックアップ召喚』！",
+             "/2026/10/grand_substitute_pu/"),
+    _article("2026.10.23", "【追記・更新】【期間限定】Fate/Samurai Remnant×Fate/Grand Order"
+                           "コラボレーションイベント「復刻版:盈月剣風帖」開幕！",
+             "/2026/10/re_sr_collaboration/"),
+    _article("2024.08.07", "「盈月剣風帖」開幕！", "/2024/08/sr_collaboration/"),
+]) + "</ul>"
+OCT_23 = 1_792_746_000.0  # 2026-10-23 18:00 JST, when the Grand event opened
+OCT_14 = OCT_23 - 9 * DAY  # when the rerun opened; its article was updated on the 23rd, which the list shows
+
+
+def test_official_news_is_read_from_the_list():
+    articles = news.parse_official_news(OFFICIAL)
+    assert len(articles) == 5
+    assert articles[1] == news.Article("「冠位名代戦：タマモアリア」開幕！",
+                                       "https://news.fate-go.jp/2026/10/grand_substitute/", (2026, 10))
+    assert news.parse_official_news(_article("2026.10.22", "TIPS集", "/info/tips/"))[0].posted is None
+
+
+def test_events_link_the_article_they_opened_with():
+    articles = news.parse_official_news(OFFICIAL)
+    grand, rerun, original, gudaguda = news.parse_events([
+        event(80637, "冠位名代戦", OCT_23, PLACEHOLDER),
+        event(80632, "復刻版:盈月剣風帖", OCT_14, OCT_14 + 21 * DAY),
+        event(80400, "盈月剣風帖", 1_723_021_200.0, 1_723_021_200.0 + 20 * DAY),  # 2024-08-07
+        event(80700, "ぐだぐだイベント2026", OCT_23 + 6 * DAY, OCT_23 + 20 * DAY),
+    ])
+    assert news.official_page(grand, articles) == "https://news.fate-go.jp/2026/10/grand_substitute/"
+    assert news.official_page(rerun, articles) == "https://news.fate-go.jp/2026/10/re_sr_collaboration/"
+    assert news.official_page(original, articles) == "https://news.fate-go.jp/2024/08/sr_collaboration/"
+    assert news.official_page(gudaguda, articles) is None  # only the "coming soon" article so far
+    # a rerun two years on doesn't get the first run's article
+    later = news.parse_events([event(1, "盈月剣風帖", OCT_23, OCT_23 + 9 * DAY)])[0]
+    assert news.official_page(later, articles[4:]) is None
+    # an event opening on the 1st may have its article posted the evening before
+    first = news.parse_events([event(2, "冠位名代戦", OCT_23 + 9 * DAY, OCT_23 + 16 * DAY)])[0]  # Nov 1st
+    assert news.official_page(first, articles) == "https://news.fate-go.jp/2026/10/grand_substitute/"
+
+
+def test_the_official_link_goes_after_the_name():
+    rerun = news.parse_events([event(80632, "復刻版:盈月剣風帖", OCT_14, OCT_14 + 21 * DAY)])[0]
+    url = "https://news.fate-go.jp/2026/10/re_sr_collaboration/"
+    first = news.event_start(rerun, official=url).split("\n")[0]
+    assert first == ("**Rerun started** · [復刻版:盈月剣風帖](<https://apps.atlasacademy.io/db/JP/event/80632>)"
+                     " · [Official page](<https://news.fate-go.jp/2026/10/re_sr_collaboration/>)")
+
+
 # --- the cog (fake guild and bot, real in-memory DB) ----------------------------------------
 
 
 class _Channel:
-    def __init__(self, error: Exception | None = None):
+    def __init__(self, error: Exception | None = None, id=55):
+        self.id = id
         self.sent: list[str] = []
         self.files: list[tuple[str, bytes] | None] = []
+        self.replies: list[int | None] = []  # the message each post replied to
         self.error = error
 
     async def send(self, content, **kwargs):
@@ -299,6 +357,9 @@ class _Channel:
         self.sent.append(content)
         file = kwargs.get("file")
         self.files.append((file.filename, file.fp.read()) if file else None)
+        reference = kwargs.get("reference")
+        self.replies.append(reference.message_id if reference else None)
+        return SimpleNamespace(id=1000 + len(self.sent))
 
 
 class _Http:
@@ -459,6 +520,48 @@ async def test_the_grand_event_gets_its_real_end_and_reminders(db):
     assert f"<t:{int(T0 + 6.8 * DAY)}:R>" in channel.sent[0]
 
 
+async def test_reminders_reply_to_their_start_post(db):
+    end = T0 + 14 * DAY
+    halloween = event(1, "Halloween", T0, end)
+    banners = [banner(10, "「冠位名代戦」準備応援 Aピックアップ召喚", T0, T0 + 20 * DAY, [1]),
+               banner(11, "「冠位名代戦」準備応援 Bピックアップ召喚", T0, T0 + 20 * DAY, [2])]
+    cog = _cog(db, [halloween], banners)
+    await cog.bot.settings.update(1, news_channel_id=55)
+    channel = _Channel()
+    assert await cog.post_due(_guild(channel), T0 + 60) == 1  # both starts in one message
+    start_id = 1001
+    assert await db.news_messages(1) == {k: (55, start_id) for k in ("event:1", "banner:10", "banner:11")}
+
+    cog.data = Data(news.parse_events([halloween, event(2, "Other", T0 - DAY, end)]),
+                    cog.data.groups, SERVANTS)
+    await db.mark_news_posted(1, [("event:2", START)])  # posted before BB saved start posts
+    assert await cog.post_due(_guild(channel), end - 2 * DAY + 60) == 2
+    sent = zip(channel.sent[1:], channel.replies[1:], strict=True)
+    replies = {text.split("]")[0]: reply for text, reply in sent}
+    assert replies == {"**2 days left** · [Halloween": start_id, "**2 days left** · [Other": None}
+
+    assert await cog.post_due(_guild(channel), T0 + 18 * DAY + 60) == 1  # the banners' reminder
+    assert channel.replies[-1] == start_id
+
+
+async def test_reminders_dont_reply_to_a_post_in_another_channel(db):
+    end = T0 + 14 * DAY
+    cog = _cog(db, [event(1, "Halloween", T0, end)])
+    await cog.bot.settings.update(1, news_channel_id=55)
+    await db.mark_news_posted(1, [("event:1", START)])
+    await db.save_news_message(1, ["event:1"], 77, 500)  # the news channel was changed since
+    channel = _Channel()
+    assert await cog.post_due(_guild(channel), end - 2 * DAY + 60) == 1
+    assert channel.replies == [None]
+
+
+def test_reminders_with_a_start_post_get_their_own_message():
+    notices = [news.Notice("a", [("event:1", SOON)]), news.Notice("b", [("event:2", SOON)]),
+               news.Notice("c", [("event:3", START)])]
+    packed = news.messages(notices, {"event:1": 7, "event:3": 9})
+    assert [(m.text, m.reply_to) for m in packed] == [("a", 7), ("b\n\nc", None)]
+
+
 async def test_real_ends_are_cached_and_survive_a_failed_lookup(db):
     grand = news.parse_events([event(80637, "冠位名代戦", T0, PLACEHOLDER, wars=[8413])])[0]
     http = _Http(pages={news.WAR_API.format(id=8413): war(T0 + 7 * DAY)})
@@ -536,6 +639,18 @@ async def test_posts_fill_in_details_from_the_event_page(db):
     assert channel.files == [("event_war_80613.png", PNG)]
 
 
+async def test_posts_link_the_official_page(db):
+    rerun = event(80632, "復刻版:盈月剣風帖", OCT_23 - 600, OCT_23 + 20 * DAY)
+    http = _Http(pages={news.OFFICIAL_NEWS: OFFICIAL})  # page 2 is missing: page 1 is still used
+    cog = _cog(db, [rerun, event(80637, "冠位名代戦", OCT_23, OCT_23 + 7 * DAY)], http=http)
+    await cog.bot.settings.update(1, news_channel_id=55)
+    channel = _Channel()
+    assert await cog.post_due(_guild(channel), OCT_23 + 60) == 1
+    assert "[Official page](<https://news.fate-go.jp/2026/10/re_sr_collaboration/>)" in channel.sent[0]
+    assert "[Official page](<https://news.fate-go.jp/2026/10/grand_substitute/>)" in channel.sent[0]
+    assert [url for _, url in http.calls].count(news.OFFICIAL_NEWS) == 1  # read once for both
+
+
 async def test_no_channel_paused_or_no_data_posts_nothing(db):
     channel = _Channel()
     cog = _cog(db, [HALLOWEEN])
@@ -591,6 +706,9 @@ class _Response:
             raise aiohttp.ClientResponseError(SimpleNamespace(real_url="x"), (), status=self.status)
 
     async def json(self, content_type=None):
+        return self.body
+
+    async def text(self):
         return self.body
 
 

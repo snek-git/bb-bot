@@ -84,15 +84,25 @@ CREATE TABLE IF NOT EXISTS news_posted (
     posted_at REAL    NOT NULL,
     PRIMARY KEY (guild_id, item_key, phase)
 );
+
+-- The start post of each FGO news item, so its reminders can reply to it.
+CREATE TABLE IF NOT EXISTS news_messages (
+    guild_id   INTEGER NOT NULL,
+    item_key   TEXT    NOT NULL,
+    channel_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    PRIMARY KEY (guild_id, item_key)
+);
 """
 
 
 # Bump SCHEMA_VERSION with every schema change: put the change in SCHEMA (new databases) and the
 # step that takes an existing database there in MIGRATIONS[new version].
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MIGRATIONS: dict[int, str] = {
     2: "ALTER TABLE reposts ADD COLUMN media TEXT NOT NULL DEFAULT '';",
     3: "",  # the news_posted table: a new table only, which SCHEMA creates
+    4: "",  # the news_messages table, the same
 }
 
 
@@ -415,6 +425,23 @@ class Database:
         await self.conn.executemany(
             "INSERT OR IGNORE INTO news_posted (guild_id, item_key, phase, posted_at) VALUES (?, ?, ?, ?)",
             [(guild_id, key, phase, ts) for key, phase in marks],
+        )
+        await self.conn.commit()
+
+    async def news_messages(self, guild_id: int) -> dict[str, tuple[int, int]]:
+        """item key -> (channel id, message id) of its start post."""
+        rows = await self._fetchall(
+            "SELECT item_key, channel_id, message_id FROM news_messages WHERE guild_id = ?", (guild_id,)
+        )
+        return {row["item_key"]: (row["channel_id"], row["message_id"]) for row in rows}
+
+    async def save_news_message(
+        self, guild_id: int, keys: list[str], channel_id: int, message_id: int
+    ) -> None:
+        await self.conn.executemany(
+            "INSERT OR REPLACE INTO news_messages (guild_id, item_key, channel_id, message_id) "
+            "VALUES (?, ?, ?, ?)",
+            [(guild_id, key, channel_id, message_id) for key in keys],
         )
         await self.conn.commit()
 

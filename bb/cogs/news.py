@@ -11,12 +11,15 @@ placeholder date years away. Their quests close on the real date, so for each su
 recently, BB reads its war's quests and uses that date instead (see news.quest_end).
 
 Event details: an event's own API page, fetched only when a start post needs it, gives its type (raid,
-box gacha, shop...) and free servant for the post, and its banner.
+box gacha, shop...) and free servant for the post, and its banner. The official news site's list (two
+pages, read once per check when a post needs it) gives the link to the article the event opened with.
 
 Pictures: an event's banner comes from that page. Atlas lists some that don't exist (the Grand
 event's), so an event post goes up a level to its war's banner (for the Grand event, the 冠位戴冠戦
 strip), then to that war's parent's. Pictures are downloaded and attached as files, as they are. A post
 with no working picture just goes out as text.
+
+Replies: each start post's message id is saved, and an item's "2 days left" and "last day" reply to it.
 """
 
 from __future__ import annotations
@@ -62,6 +65,7 @@ class News(commands.Cog):
         self._wars: dict[int, tuple[str | None, int]] = {}  # war id -> (its banner, the war above it)
         self._pictures: dict[str, bytes | None] = {}  # picture URL -> its bytes (None: it doesn't exist)
         self._real_ends: dict[int, tuple[float, float | None]] = {}  # event id -> (looked up at, end)
+        self._articles: list[news.Article] | None = None  # the official news list, read once per check
 
     async def cog_load(self) -> None:
         self.tick.start()
@@ -79,6 +83,7 @@ class News(commands.Cog):
         if self.data is None:
             return
         self._pictures.clear()  # downloaded again only when a post needs them
+        self._articles = None
         for guild in list(self.bot.guilds):
             try:
                 await self.post_due(guild, ts)
@@ -165,6 +170,24 @@ class News(commands.Cog):
         self._event_pages[event_id] = page
         return page
 
+    async def official_news(self) -> list[news.Article]:
+        """The newest articles on the official news site. A page that can't be read is skipped: the
+        posts just go out without the link."""
+        if self._articles is not None:
+            return self._articles
+        articles: list[news.Article] = []
+        for n in range(1, news.OFFICIAL_PAGES + 1):
+            url = news.OFFICIAL_NEWS if n == 1 else f"{news.OFFICIAL_NEWS}page/{n}/"
+            try:
+                async with self.bot.http_client.get(url) as resp:
+                    resp.raise_for_status()
+                    articles += news.parse_official_news(await resp.text())
+            except FETCH_ERRORS as exc:
+                log.info("news: couldn't read the official news page %s: %r", url, exc)
+                break
+        self._articles = articles
+        return articles
+
     async def picture(self, url: str) -> bytes | None:
         """The picture's bytes, or None if it doesn't exist, isn't an image, or is too big to upload."""
         if url in self._pictures:
@@ -215,14 +238,14 @@ class News(commands.Cog):
                     break
 
     async def add_details(self, notices: list[news.Notice]) -> None:
-        """What the exports don't have, in place: an event post's type and free servant, and every post's
-        picture, downloaded. A post with no working picture gets none."""
+        """What the exports don't have, in place: an event post's type, free servant and official page, and
+        every post's picture, downloaded. A post with no working picture gets none."""
         servants = self.data.servants if self.data else {}
         for notice in notices:
             if notice.event is not None and notice.image is None:
                 page = await self.event_page(notice.event.id)
-                if page is not None:
-                    notice.text = news.event_start(notice.event, page, servants)
+                official = news.official_page(notice.event, await self.official_news())
+                notice.text = news.event_start(notice.event, page, servants, official)
                 async for url in self._event_pictures(notice, page):
                     if url and await self.picture(url) is not None:
                         notice.image = url
@@ -268,10 +291,18 @@ class News(commands.Cog):
             return 0
 
         await self.add_details(due)
+        posts = await self.bot.db.news_messages(guild.id)
+        starts = {key: message for key, (where, message) in posts.items() if where == channel.id}
         sent = 0
-        for message in news.messages(due):
+        for message in news.messages(due, starts):
+            kwargs = self.send_kwargs(message)
+            if message.reply_to:
+                # the start post may have been deleted since: then the reminder goes out on its own
+                kwargs["reference"] = discord.MessageReference(
+                    message_id=message.reply_to, channel_id=channel.id, fail_if_not_exists=False
+                )
             try:
-                await channel.send(**self.send_kwargs(message))
+                posted = await channel.send(**kwargs)
             except (discord.Forbidden, discord.NotFound) as exc:
                 log.warning("news: can't post in guild %s: %s", guild.id, exc)
             except discord.HTTPException as exc:
@@ -279,6 +310,9 @@ class News(commands.Cog):
                 return sent
             else:
                 sent += 1
+                started = [key for key, phase in message.marks if phase == news.START]
+                if started:
+                    await self.bot.db.save_news_message(guild.id, started, channel.id, posted.id)
             await self.bot.db.mark_news_posted(guild.id, message.marks, ts)
         if sent:
             log.info("news: posted %d message(s) in guild %s", sent, guild.id)

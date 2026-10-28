@@ -216,6 +216,13 @@ news.new_content:
   lines:
     - "**Now open** · {name}"
 
+# After the event name in a start post: its article on the official news site. <> keeps Discord from
+# showing a preview of it.
+news.official:
+  vars: [url]
+  lines:
+    - "[Official page](<{url}>)"
+
 # Part of the event details line ("Raid · Shop · Free servant: Miyamoto Iori (4★)").
 news.free_servant:
   vars: [servants]

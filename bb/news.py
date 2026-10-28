@@ -17,21 +17,26 @@ while its quests close a week after it opens). For those the cog reads the quest
 Every (item, phase) pair is recorded once posted, so nothing is posted twice.
 
 An event's start post also says what kind of event it is and who joins free (event_details), from the
-event's own page, which the cog looks up.
+event's own page, which the cog looks up. It links the official article it opened with too, when the
+official news site has one (official_page).
 
 Start posts carry a picture: a banner post its first new banner's art, an event post the event's banner,
 or its war's when it has none (the cog looks those up, since the exports don't have them, and attaches
-pictures as files). Reminders are text only.
+pictures as files). Reminders are text only, and reply to their start post when BB made one.
 """
 
 from __future__ import annotations
 
+import html
 import os
 import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any
+from urllib.parse import urljoin
+from zoneinfo import ZoneInfo
 
 from bb import strings
 
@@ -44,6 +49,8 @@ EVENT_PAGE = f"https://apps.atlasacademy.io/db/{REGION}/event/{{id}}"
 EVENT_API = f"https://api.atlasacademy.io/nice/{REGION}/event/{{id}}"  # has the event's banner image
 WAR_API = f"https://api.atlasacademy.io/nice/{REGION}/war/{{id}}"  # has its quests' close times
 BANNER_ART = f"https://static.atlasacademy.io/{REGION}/SummonBanners/img_summon_{{id}}.png"
+OFFICIAL_NEWS = "https://news.fate-go.jp/"  # the official JP news list, newest first, 10 a page
+OFFICIAL_PAGES = 2  # an event that started a few days ago can be on page 2 already
 
 DAY = 86400.0
 FRESH = 2 * DAY  # how late a start may still be posted (BB offline, a slow data update)
@@ -74,6 +81,15 @@ EVENT_KINDS: tuple[tuple[str, str], ...] = (
 # "join"/"directJoin": the welfare servant. "condJoin" is a pick-one-of-many campaign (130 servants for
 # the 35M downloads one), which isn't a free servant worth naming.
 FREE_JOINS = {"join", "directJoin"}
+
+JST = ZoneInfo("Asia/Tokyo")
+# One article in the official list: <p class="date">2026.10.23</p> <p class="title">...</p> <a href="...">
+_ARTICLE = re.compile(r'<p class="title">(.*?)</p>\s*<a href="([^"]+)"', re.DOTALL)
+# An article's address keeps the month it was first posted in (/2026/10/re_sr_collaboration/). The date
+# in the list is when it was last updated, so it can be days after the event opened.
+_POSTED = re.compile(r"^/(\d{4})/(\d{2})/")
+OPENED = "開幕"  # in the title of the article an event opens with
+PREVIEW = "【予告】"  # the "coming soon" article, posted days before
 
 START, SOON, LAST = "start", "soon", "last"
 Mark = tuple[str, str]  # (item key, phase)
@@ -135,16 +151,27 @@ class EventPage:
     free: tuple[int, ...] = ()
 
 
+@dataclass(frozen=True)
+class Article:
+    """An article on the official news site. posted: the (year, month) it was first posted, Japan time;
+    None for pages that aren't dated (the tips page)."""
+
+    title: str
+    url: str
+    posted: tuple[int, int] | None
+
+
 @dataclass
 class Notice:
     """One item of a post. marks: what gets recorded once it's sent. image: a picture attached to it.
     event: the event whose banner (or, without one, its war's) should become the image; the cog looks
-    it up."""
+    it up. reply_to: the message id of the start post a reminder replies to (set by messages)."""
 
     text: str
     marks: list[Mark] = field(default_factory=list)
     image: str | None = None
     event: Event | None = None
+    reply_to: int | None = None
 
 
 # --- parsing ----------------------------------------------------------------------------------
@@ -199,6 +226,34 @@ def parse_event_page(body: dict[str, Any]) -> EventPage:
     joins = body.get("svts") or ()
     free = tuple(dict.fromkeys(int(s["svtId"]) for s in joins if s.get("type") in FREE_JOINS))
     return EventPage(body.get("banner") or body.get("noticeBanner") or None, tuple(kinds), free)
+
+
+def parse_official_news(page: str) -> list[Article]:
+    articles = []
+    for title, href in _ARTICLE.findall(page):
+        posted = _POSTED.match(href)
+        articles.append(Article(
+            _flat(html.unescape(re.sub(r"<[^>]+>", "", title))),
+            urljoin(OFFICIAL_NEWS, href),
+            (int(posted[1]), int(posted[2])) if posted else None,
+        ))
+    return articles
+
+
+def official_page(event: Event, articles: Iterable[Article]) -> str | None:
+    """The official article the event opened with: its title names the event and says it opened
+    ("「冠位名代戦：タマモアリア」開幕！" for 冠位名代戦), and it was posted the month the event opened (or
+    the month before, for one opening on the 1st). So a rerun's article and the first run's, or last
+    year's event of the same name, don't get mixed up."""
+    name = "".join(event.name.split())
+    opened = datetime.fromtimestamp(event.start, JST)
+    before = opened.replace(day=1) - timedelta(days=1)
+    months = {(opened.year, opened.month), (before.year, before.month)}
+    for article in articles:
+        title = "".join(article.title.split())
+        if article.posted in months and name in title and OPENED in title and PREVIEW not in title:
+            return article.url
+    return None
 
 
 def needs_real_end(event: Event, ts: float) -> bool:
@@ -379,14 +434,20 @@ def _event_link(event: Event) -> str:
 
 
 def event_start(
-    event: Event, page: EventPage | None = None, servants: dict[int, Servant] | None = None
+    event: Event,
+    page: EventPage | None = None,
+    servants: dict[int, Servant] | None = None,
+    official: str | None = None,
 ) -> str:
-    """The start post. With the event's page: a line saying what kind of event it is and who joins free."""
+    """The start post. With the event's page: a line saying what kind of event it is and who joins free.
+    With its official article: a link to it after the name."""
     if event.end - event.start > LONG:
         lines = [strings.line("news.new_content", name=_event_link(event))]
     else:
         key = "news.rerun_start" if RERUN in event.name else "news.event_start"
         lines = [strings.line(key, name=_event_link(event))]
+    if official:
+        lines[0] += " · " + strings.line("news.official", url=official)
     details = event_details(page, servants or {}) if page else ""
     if details:
         lines.append(details)
@@ -438,20 +499,33 @@ def banner_ending(group: Group, phase: str, count: int) -> str:
     return strings.line(key, name=name) + "\n" + _ends(group.end)
 
 
-def messages(notices: list[Notice]) -> list[Notice]:
+def _start_post(notice: Notice, starts: dict[str, int]) -> int | None:
+    """The start post a reminder answers: the first one posted for any item it's about. None for start
+    posts, and for reminders whose start post BB never made (or made in another channel)."""
+    if any(phase == START for _, phase in notice.marks):
+        return None
+    ids = [starts[key] for key, _ in notice.marks if key in starts]
+    return min(ids) if ids else None
+
+
+def messages(notices: list[Notice], starts: dict[str, int] | None = None) -> list[Notice]:
     """Notices packed into as few Discord messages as fit, a blank line between items. An item with a
-    picture gets a message of its own, so each picture sits right under its own text."""
+    picture gets a message of its own, so each picture sits right under its own text. So does a reminder
+    whose start post is in starts (item key -> message id): it goes out as a reply to that post."""
     packed: list[Notice] = []
     for notice in notices:
+        reply_to = _start_post(notice, starts or {})
         last = packed[-1] if packed else None
         if (
             last is not None
             and last.image is None
+            and last.reply_to is None
             and notice.image is None
+            and reply_to is None
             and len(last.text) + 2 + len(notice.text) <= MAX_MESSAGE
         ):
             last.text += "\n\n" + notice.text
             last.marks.extend(notice.marks)
         else:  # MAX_PICKUPS keeps one item well under MAX_MESSAGE
-            packed.append(Notice(notice.text, list(notice.marks), image=notice.image))
+            packed.append(Notice(notice.text, list(notice.marks), image=notice.image, reply_to=reply_to))
     return packed
