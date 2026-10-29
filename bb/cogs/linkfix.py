@@ -27,6 +27,7 @@ from discord.ext import commands
 from bb import ehentai, nhentai, render, rerun, strings, upload, views
 from bb.cards import Cover
 from bb.db import PostRow, RepostRow
+from bb.fixlog import trail
 from bb.links import extract, resolve, sites
 from bb.links.model import Fixer, LinkMatch
 from bb.settings_store import GuildSettings, RareLine
@@ -338,6 +339,16 @@ def _embed_dicts(message: Any) -> list[dict[str, Any]]:
     return [embed.to_dict() for embed in getattr(message, "embeds", None) or []]
 
 
+def describe(embeds: Iterable[dict[str, Any]]) -> str:
+    """What a preview shows, for the logs: "'pwt (@Feli_NFN)' with image" or "... text only"."""
+    parts = []
+    for embed in embeds:
+        title = embed.get("title") or (embed.get("author") or {}).get("name") or embed.get("url") or "?"
+        media = [kind for kind in ("video", "image", "thumbnail") if embed.get(kind)]
+        parts.append(f"{title[:60]!r} with {media[0]}" if media else f"{title[:60]!r} text only")
+    return "; ".join(parts) or "nothing"
+
+
 def _parent_id(channel: Any) -> int | None:
     return channel.parent_id if isinstance(channel, discord.Thread) else None
 
@@ -438,9 +449,13 @@ class LinkFix(commands.Cog):
         guild = message.guild
         if guild is None:
             return
+        # Messages without a link are most of chat: only ones with a link get a trail.
+        has_link = bool(extract.extract_urls(message.content))
         async with self.message_lock(message.id):
             settings = await self.bot.settings.get(guild.id)
             if settings.paused:
+                if has_link:
+                    trail(message, "BB is paused in this server, not fixing")
                 return
             if not should_handle(
                 settings,
@@ -448,6 +463,9 @@ class LinkFix(commands.Cog):
                 parent_id=_parent_id(message.channel),
                 is_webhook=message.webhook_id is not None,
             ):
+                if has_link:
+                    trail(message, "BB is off in channel %s (or it's a webhook post), not fixing",
+                          message.channel.id)
                 return
             db = self.bot.db
             old_keys = await db.post_keys_for_message(message.id)
@@ -456,14 +474,20 @@ class LinkFix(commands.Cog):
             if not old_keys and is_history(message.created_at.timestamp(), now()):
                 # Never touch old messages BB didn't handle when they were new, whatever the event says
                 # (edit events for scrolled-to history, replays after a reconnect, ...).
+                if has_link and not edit:
+                    trail(message, "too old to fix (BB only fixes new messages)")
                 return
             cards = 0
             if is_skipped(message.content, settings.skip_word):
+                if has_link:
+                    trail(message, "has the skip word %r, not fixing", settings.skip_word)
                 if not edit:
                     return
                 matches: list[LinkMatch] = []
             else:
                 matches = await collect_matches(message.content, settings, self.bot.http_session)
+                if has_link and not matches and not edit:
+                    trail(message, "no supported link in it")
                 if not edit:
                     cards = await self._post_cards(message, settings)
             # Cards aren't edit-synced: an edit that doesn't touch the gallery link shouldn't drop its card.
@@ -475,10 +499,17 @@ class LinkFix(commands.Cog):
             ):
                 # An event on an old message that isn't a fresh edit (a misread pin, a refresh) can take a
                 # link away, but never brings new reposts into old history.
-                log.info("edit on old message %s: not fixing %d new link(s)", message.id, len(added))
+                trail(message, "edit on an old message: not fixing %d new link(s)", len(added))
                 added = []
             for key in removed:
+                trail(message, "edited: %s is gone from it, removing its repost", key)
                 await self._remove_link(message.id, key)
+            if added:
+                trail(
+                    message, "%s %s from %s (%s) in channel %s",
+                    "edited in" if edit else "found", ", ".join(m.url for m in added),
+                    message.author.display_name, message.author.id, message.channel.id,
+                )
             if not added:
                 if cards and message.id not in self._deleted_origins:
                     # Only cards: the original's own (bare) gallery preview goes, like a fixed link's would.
@@ -491,16 +522,24 @@ class LinkFix(commands.Cog):
                         await self._apply_original(message, action)
                 return
             outcomes = await self._fix_links(message, settings, added, edit=edit)
-            if not outcomes or message.id in self._deleted_origins:
+            if message.id in self._deleted_origins:
+                trail(message, "the original was deleted, done")
+                return
+            if not outcomes:
+                trail(message, "no repost made, the original keeps its own preview")
                 return
             statuses = [row.status for row in await db.get_reposts_for_origin(message.id)]
             statuses += [o for o in outcomes if o not in SETTLED_OK]
-            action = original_action(
-                settings.original_action,
-                statuses,
-                has_already_fixed=any(is_already_fixed(m) for m in matches),
-            )
-            if action != "nothing":
+            has_already_fixed = any(is_already_fixed(m) for m in matches)
+            action = original_action(settings.original_action, statuses, has_already_fixed=has_already_fixed)
+            if action == "nothing":
+                why = (
+                    "the server setting says so" if settings.original_action == "nothing"
+                    else "the poster used a fixer link themselves" if has_already_fixed
+                    else f"not every repost worked ({', '.join(statuses) or 'none left'})"
+                )
+                trail(message, "leaving the original as it is: %s", why)
+            else:
                 await self._apply_original(message, action)
 
     async def delete_repost_message(self, row: RepostRow) -> bool:
@@ -514,11 +553,13 @@ class LinkFix(commands.Cog):
             return True
         except discord.HTTPException as exc:
             if not row.via_webhook:
-                log.warning("could not delete repost %s: %s", row.repost_id, exc)
+                trail(row.origin_message_id, "could not delete repost %s: %s", row.repost_id, exc,
+                      level=logging.WARNING)
                 return False
         hook = next((h for h in self._webhooks.values() if h.id == row.webhook_id), None)
         if hook is None:
-            log.warning("could not delete webhook repost %s: webhook not cached", row.repost_id)
+            trail(row.origin_message_id, "could not delete webhook repost %s: webhook not cached",
+                  row.repost_id, level=logging.WARNING)
             return False
         in_thread = hook.channel_id != row.channel_id
         thread = discord.Object(row.channel_id) if in_thread else discord.utils.MISSING
@@ -527,7 +568,8 @@ class LinkFix(commands.Cog):
         except discord.NotFound:
             return True
         except discord.HTTPException as exc:
-            log.warning("could not delete webhook repost %s: %s", row.repost_id, exc)
+            trail(row.origin_message_id, "could not delete webhook repost %s: %s", row.repost_id, exc,
+                  level=logging.WARNING)
             return False
         return True
 
@@ -539,8 +581,8 @@ class LinkFix(commands.Cog):
             return
         try:
             await self.process(message)
-        except Exception:
-            log.exception("link fixing failed for message %s", message.id)
+        except Exception as exc:
+            trail(message, "crashed, BB stopped here", level=logging.ERROR, exc_info=exc)
 
     @commands.Cog.listener()
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
@@ -556,7 +598,7 @@ class LinkFix(commands.Cog):
             try:
                 await self._note_late_preview(payload.message_id, watch, embeds)
             except Exception:
-                log.exception("undoing a rescue failed for message %s", payload.message_id)
+                trail(payload.message_id, "undoing a rescue crashed", level=logging.ERROR, exc_info=True)
         if waiter is not None or watch is not None:
             return
         if self._is_own_message(payload.data):
@@ -598,7 +640,10 @@ class LinkFix(commands.Cog):
                 site=m.site.id,
                 canonical_key=m.canonical_key,
             )
+            if rerun_line:
+                trail(message, "%s was posted before: roasting it", m.canonical_key)
             if is_already_fixed(m):
+                trail(message, "%s is already a fixer link: BB only steps in if it shows no preview", m.url)
                 already_fixed.append((m, rerun_line))
                 continue
             repost = await self._repost(message, settings, m, rerun_line, quip_channel=quip_channel)
@@ -650,7 +695,8 @@ class LinkFix(commands.Cog):
         outcomes: list[str] = []
         for repost, result in zip(live, results, strict=True):
             if isinstance(result, BaseException):
-                log.error("repost %s failed to settle", repost.row.repost_id, exc_info=result)
+                trail(repost.origin or repost.row.origin_message_id, "repost %s crashed while settling",
+                      repost.row.repost_id, level=logging.ERROR, exc_info=result)
                 outcomes.append("failed")
             else:
                 outcomes.append(result)
@@ -673,14 +719,17 @@ class LinkFix(commands.Cog):
             or await self._wait_for_embeds(message.id, seconds=self.rescue_timeout)
             or _embed_dicts(message)
         )
-        if previewed or message.id in self._deleted_origins:
+        if message.id in self._deleted_origins:
+            return []
+        if previewed:
+            trail(message, "the fixer link has its own preview, leaving it")
             return []
         watch = self._watch_rescue(message, {m.canonical_key for m, _ in already_fixed})
         try:
             live: list[LiveRepost] = []
             silent: list[tuple[str, LiveRepost]] = []
             for m, rerun_line in already_fixed:
-                log.info("no preview for %s on message %s; fixing it", m.url, message.id)
+                trail(message, "no preview for %s after %.0fs, fixing it", m.url, self.rescue_timeout)
                 repost = await self._repost(message, settings, m, rerun_line, quip_channel=quip_channel)
                 if repost is not None:
                     live.append(repost)
@@ -694,7 +743,7 @@ class LinkFix(commands.Cog):
         try:
             await self._undo_rescues(message.id)  # a late preview that landed while BB was still settling
         except Exception:
-            log.exception("undoing a rescue failed for message %s", message.id)
+            trail(message, "undoing a rescue crashed", level=logging.ERROR, exc_info=True)
         return outcomes
 
     def _watch_rescue(self, message: discord.Message, keys: set[str]) -> RescueWatch:
@@ -738,9 +787,9 @@ class LinkFix(commands.Cog):
             repost_id = watch.reposts.get(key)
             row = await db.get_repost(repost_id) if repost_id is not None else None
             if row is not None:  # None: it said something (kept on purpose), or it's already gone
-                log.info(
-                    "late preview for %s on message %s, %.0fs after it was posted; taking BB's repost down",
-                    row.original_url, origin_id, now() - watch.posted_at,
+                trail(
+                    origin_id, "late preview for %s, %.0fs after it was posted: taking repost %s down",
+                    row.original_url, now() - watch.posted_at, row.repost_id,
                 )
                 if not await self.delete_repost_message(row):
                     continue  # still up: keep watching, the next preview update retries
@@ -806,8 +855,12 @@ class LinkFix(commands.Cog):
         try:
             sent = await self._send_message(message, settings, content, view)
         except discord.HTTPException as exc:
-            log.warning("could not repost in channel %s: %s", message.channel.id, exc)
+            trail(message, "could not send the repost of %s: %s", m.url, exc, level=logging.WARNING)
             return None
+        trail(
+            message, "sent repost %s for %s via %s%s", sent.message.id, m.canonical_key,
+            first.name if first is not None else "upload", " (as the poster)" if sent.webhook else "",
+        )
         row = RepostRow(
             repost_id=sent.message.id,
             guild_id=guild.id,
@@ -839,12 +892,15 @@ class LinkFix(commands.Cog):
         try:
             return await self._walk_chain(repost)
         except (discord.NotFound, RepostGone):
-            await self.bot.db.delete_repost(repost.row.repost_id)  # someone deleted it mid-fix
+            trail(repost.origin or repost.row.origin_message_id,
+                  "repost %s was deleted by someone while BB was still fixing it", repost.row.repost_id)
+            await self.bot.db.delete_repost(repost.row.repost_id)
             return "gone"
 
     async def _walk_chain(self, repost: LiveRepost) -> str:
         db = self.bot.db
         row, m = repost.row, repost.match
+        origin = repost.origin or row.origin_message_id
         embeds = _embed_dicts(repost.sent.message)
         for index, fixer in enumerate(repost.chain):
             if repost.row.origin_message_id in self._deleted_origins:
@@ -863,9 +919,13 @@ class LinkFix(commands.Cog):
                 await self._drop(repost)
                 return "gone"
             if embeds:
+                trail(origin, "%s showed a preview for %s: %s", fixer.name, m.canonical_key, describe(embeds))
                 row.status = "ok"
                 await db.update_repost(row.repost_id, status="ok")
                 return "ok"
+            following = repost.chain[index + 1].name if index + 1 < len(repost.chain) else "uploading it"
+            trail(origin, "no preview from %s for %s within %.0fs, next: %s",
+                  fixer.name, m.canonical_key, self.embed_timeout, following)
         if row.origin_message_id in self._deleted_origins:
             await self._drop(repost)
             return "gone"
@@ -914,9 +974,13 @@ class LinkFix(commands.Cog):
                 await self._replace(
                     repost, content=render.format_upload(m, quip), make_files=make_files, view=view
                 )
+                trail(repost.origin or row.origin_message_id, "uploaded %d file(s) for %s itself",
+                      len(media), m.canonical_key)
                 row.status, row.quip, row.fixer_id = "uploaded", quip, None
                 await db.update_repost(row.repost_id, status="uploaded", quip=quip, fixer_id=None)
                 return "uploaded"
+        trail(repost.origin or row.origin_message_id,
+              "every fixer and the upload failed for %s: posting the failure line", m.canonical_key)
         quip = settle_quip(row.quip, is_rerun=repost.is_rerun, outcome="failed")
         await self._replace(repost, content=render.format_upload(m, quip))
         row.status, row.quip, row.fixer_id = "failed", quip, None
@@ -938,6 +1002,8 @@ class LinkFix(commands.Cog):
 
     async def _drop(self, repost: LiveRepost) -> None:
         """The original vanished while BB was working: take the repost down too."""
+        trail(repost.row.origin_message_id, "the original was deleted mid-fix: taking repost %s down",
+              repost.row.repost_id)
         await self.delete_repost_message(repost.row)
         await self.bot.db.delete_repost(repost.row.repost_id)
 
@@ -1101,7 +1167,8 @@ class LinkFix(commands.Cog):
             except discord.NotFound:
                 self._webhooks.pop(hook.channel_id or 0, None)  # deleted by someone; make a new one
             except (discord.HTTPException, ValueError) as exc:
-                log.warning("webhook send failed in %s, replying instead: %s", message.channel.id, exc)
+                trail(message, "posting as the poster failed, replying instead: %s", exc,
+                      level=logging.WARNING)
                 return None
         return None
 
@@ -1152,8 +1219,10 @@ class LinkFix(commands.Cog):
                 make_files=make_files, quiet=True,
             )
         except discord.HTTPException as exc:
-            log.warning("could not replace repost %s, editing it instead: %s", row.repost_id, exc)
+            trail(repost.origin, "could not send a new repost to replace %s, editing it instead: %s",
+                  row.repost_id, exc, level=logging.WARNING)
             return await self._edit(repost, **_changes(content, view, make_files))
+        trail(repost.origin, "replaced repost %s with %s", row.repost_id, sent.message.id)
         row.repost_id = sent.message.id
         row.via_webhook = sent.webhook is not None
         row.webhook_id = sent.webhook.id if sent.webhook is not None else None
@@ -1163,15 +1232,16 @@ class LinkFix(commands.Cog):
         await db.insert_repost(row)
         if row.origin_message_id in self._deleted_origins or await db.get_repost(old.repost_id) is None:
             # The original, or the old repost, was deleted while the new one was on its way: it goes too.
+            trail(repost.origin, "the original or repost %s was deleted meanwhile: taking %s down too",
+                  old.repost_id, row.repost_id)
             await self.delete_repost_message(row)
             await db.delete_repost(row.repost_id)
             raise RepostGone
         if await self.delete_repost_message(old):
             await db.delete_repost(old.repost_id)
         else:  # still up: keep tracking it, so edits and deletes of the original still reach it
-            log.warning(
-                "replaced repost %s, but its old message %s is still up", row.repost_id, old.repost_id
-            )
+            trail(repost.origin, "replaced repost %s, but the old message %s is still up",
+                  row.repost_id, old.repost_id, level=logging.WARNING)
         return sent.message
 
     async def _edit(self, repost: LiveRepost, **changes: Any) -> Any:
@@ -1213,18 +1283,21 @@ class LinkFix(commands.Cog):
         try:
             if action == "suppress":
                 await message.edit(suppress=True)
+                trail(message, "every repost worked: hid the original's preview")
                 # Previews that were still resolving can come back after the first suppress.
                 await asyncio.sleep(self.resuppress_delay)
                 fresh = await message.channel.fetch_message(message.id)
                 if fresh.embeds or not fresh.flags.suppress_embeds:
+                    trail(message, "the original's preview came back: hid it again")
                     await fresh.edit(suppress=True)
             elif action == "delete":
                 self._expected_deletes.add(message.id)
                 await message.delete()
+                trail(message, "every repost worked: deleted the original (server setting)")
         except discord.HTTPException as exc:
             self._expected_deletes.consume(message.id)
             if not isinstance(exc, discord.NotFound):
-                log.warning("could not %s original %s: %s", action, message.id, exc)
+                trail(message, "could not %s the original: %s", action, exc, level=logging.WARNING)
 
 
 async def setup(bot: BBBot) -> None:

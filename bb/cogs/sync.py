@@ -10,6 +10,8 @@ from typing import TYPE_CHECKING, Any
 import discord
 from discord.ext import commands
 
+from bb.fixlog import trail
+
 if TYPE_CHECKING:
     from bb.bot import BBBot
     from bb.cogs.linkfix import LinkFix
@@ -61,10 +63,15 @@ class Sync(commands.Cog):
         linkfix = self.linkfix
         if linkfix is not None and linkfix.consume_expected_delete(message_id):
             return  # BB deleted the original itself (original_action = delete): keep the reposts
-        if await db.get_repost(message_id) is not None:
-            await db.delete_repost(message_id)  # someone deleted a repost
+        repost = await db.get_repost(message_id)
+        if repost is not None:
+            trail(repost.origin_message_id, "someone deleted repost %s directly (not with its button)",
+                  message_id)
+            await db.delete_repost(message_id)
             return
         rows = await db.get_reposts_for_origin(message_id)
+        if rows or await db.post_keys_for_message(message_id):
+            trail(message_id, "the original was deleted: taking down %d repost(s)", len(rows))
         if linkfix is not None:
             linkfix.mark_origin_deleted(message_id)  # a fix still in progress drops its repost
             for row in rows:
@@ -80,7 +87,7 @@ class Sync(commands.Cog):
         try:
             await self.handle_deleted(payload.message_id)
         except Exception:
-            log.exception("delete sync failed for message %s", payload.message_id)
+            trail(payload.message_id, "delete sync crashed", level=logging.ERROR, exc_info=True)
 
     @commands.Cog.listener()
     async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
@@ -90,7 +97,7 @@ class Sync(commands.Cog):
             try:
                 await self.handle_deleted(message_id)
             except Exception:
-                log.exception("delete sync failed for message %s", message_id)
+                trail(message_id, "delete sync crashed", level=logging.ERROR, exc_info=True)
 
     @commands.Cog.listener()
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
@@ -110,7 +117,7 @@ class Sync(commands.Cog):
                 return
             await linkfix.process(message, edit=True)
         except Exception:
-            log.exception("edit sync failed for message %s", payload.message_id)
+            trail(payload.message_id, "edit sync crashed", level=logging.ERROR, exc_info=True)
 
 
 async def setup(bot: BBBot) -> None:

@@ -14,6 +14,7 @@ from discord.ext import commands
 
 from bb import render, strings, views
 from bb.db import RepostRow
+from bb.fixlog import trail
 from bb.links import sites
 from bb.links.model import Fixer
 
@@ -128,11 +129,14 @@ class Buttons(commands.Cog):
         try:
             await self._delete_message(message, webhook_id_for(row, message), interaction.channel)
         except discord.HTTPException:
-            log.exception("deleting repost %s failed", message.id)
+            trail(row.origin_message_id if row else message.id, "the Delete button couldn't delete repost %s",
+                  message.id, level=logging.ERROR, exc_info=True)
             await interaction.followup.send(strings.line("error.generic"), ephemeral=True)
             return
         await self.bot.db.delete_repost(message.id)
         if row is not None:
+            trail(row.origin_message_id, "user %s took repost %s down with its Delete button",
+                  interaction.user.id, message.id)
             await self._restore_original(interaction.channel, row.origin_message_id)
         if from_menu:
             await interaction.followup.send(strings.line("delete.done"), ephemeral=True)

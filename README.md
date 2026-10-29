@@ -112,6 +112,14 @@ scripts/deploy.sh
 Runs lint and tests, copies the project (including `.env`) to `mc-server:/opt/bb-bot`, rebuilds the
 container, and waits until BB is back on Discord. `BB_HOST` / `BB_DEST` change the target.
 
+**Logs:** besides `docker compose logs`, BB writes `/app/data/logs/bb.log` in the `bb-data` volume (10
+files of 5 MB), so the logs survive a deploy. Every step of a link fix logs a line starting with
+`fix <message id>`, so to see why a link was or wasn't fixed, copy the message's id and run:
+
+```bash
+ssh mc-server 'cd /opt/bb-bot && docker compose exec -T bb sh -c "cd /app/data/logs && cat \$(ls -r bb.log*) | grep \"fix MESSAGE_ID\""'
+```
+
 **Backups:** `/etc/cron.d/bb-bot-backup` runs `scripts/backup.sh` nightly at 04:30 server time. It copies
 the database to `/opt/bb-bot-backups/bb-YYYY-MM-DD.sqlite` (kept outside the deploy folder, so a deploy
 can't touch it) and keeps the newest 14. Restore by stopping BB and copying a backup over

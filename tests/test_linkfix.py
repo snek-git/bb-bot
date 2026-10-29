@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import logging
 import random
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -384,6 +385,61 @@ async def test_next_fixer_when_no_preview(h, db):
     assert "vxtwitter.com/twitter:1" in second["content"] and second["view"] == first["view"]
     assert second["quiet"] and not first["quiet"]  # the replacement pings nobody
     assert h.original == [(500, "suppress")]
+
+
+async def test_every_step_leaves_a_trail(h, db, caplog):
+    caplog.set_level(logging.INFO, logger="bb.fix")
+    h.embed_script = [[], [text_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1"))
+    steps = [r.getMessage().split(": ", 1)[1] for r in caplog.records]
+    assert all(r.getMessage().startswith("fix 500 +") for r in caplog.records)  # grep the id, get it all
+    assert steps == [
+        f"found https://x.com/a/status/1 from bob (200) in channel {CH}",
+        "sent repost 9000 for twitter:1 via FxTwitter",
+        "no preview from FxTwitter for twitter:1 within 6s, next: vxTwitter",
+        "replaced repost 9000 with 9001",
+        "vxTwitter showed a preview for twitter:1: 't' text only",
+    ]
+
+
+async def test_a_message_bb_skips_says_why(h, db, caplog):
+    caplog.set_level(logging.INFO, logger="bb.fix")
+    await h.quiet(skip_word="nobb")
+    await h.cog.process(message("https://x.com/a/status/1 nobb"))
+    steps = [r.getMessage().split(": ", 1)[1] for r in caplog.records]
+    assert steps == ["has the skip word 'nobb', not fixing"]
+    caplog.clear()
+    await h.cog.process(message("no links here", mid=501))
+    assert caplog.records == []  # chat without links leaves no trail
+
+
+async def test_crashes_are_in_the_trail_too(h, db, caplog):
+    caplog.set_level(logging.INFO, logger="bb.fix")
+
+    async def broken(repost):
+        raise RuntimeError("boom")
+
+    h.cog._walk_chain = broken
+    await h.cog.process(message("https://x.com/a/status/1"))
+    (crash,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert crash.getMessage().startswith("fix 500 +") and "crashed while settling" in crash.getMessage()
+    assert crash.exc_info[1].args == ("boom",)
+    caplog.clear()
+
+    async def broken_fix(*args, **kwargs):
+        raise RuntimeError("worse")
+
+    h.cog._fix_links = broken_fix
+    h.bot.user = SimpleNamespace(id=1)
+    await h.cog.on_message(message("https://x.com/a/status/2", mid=501))
+    (crash,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert crash.getMessage().startswith("fix 501 +") and "crashed" in crash.getMessage()
+
+
+def test_describe_says_what_a_preview_shows():
+    assert lf.describe([image_embed().to_dict()]) == "'t' with image"
+    assert lf.describe([text_embed().to_dict()]) == "'t' text only"
+    assert lf.describe([]) == "nothing"
 
 
 async def test_replacement_that_cannot_be_sent_edits_instead(h, db):

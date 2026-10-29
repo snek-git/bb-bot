@@ -7,14 +7,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import logging.handlers
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 import discord
 
 from bb import strings
 from bb.bot import BBBot
 from bb.config import Config
+
+LOG_FILE_BYTES = 5 * 1024 * 1024
+LOG_FILES = 10  # about 50 MB: weeks of logs at BB's usual volume
 
 
 async def _check(config: Config) -> int:
@@ -26,6 +31,18 @@ async def _check(config: Config) -> int:
         print(f"app commands: {', '.join(sorted(c.name for c in bot.tree.get_commands())) or '(none)'}")
         print("ok")
     return 0
+
+
+def _log_to_file(path: Path) -> None:
+    """Also log to a file next to the database. Under Docker that's the data volume, so the logs outlive
+    a rebuild (the container's own logs don't): "why didn't BB fix this yesterday" stays answerable.
+    LOG_FILE_BYTES * LOG_FILES at most."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.handlers.RotatingFileHandler(
+        path, maxBytes=LOG_FILE_BYTES, backupCount=LOG_FILES - 1, encoding="utf-8"
+    )
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)-8s %(name)s %(message)s"))
+    logging.getLogger().addHandler(handler)
 
 
 def main() -> int:
@@ -45,6 +62,7 @@ def main() -> int:
     if not config.token:
         print("DISCORD_TOKEN is missing. Copy .env.example to .env and fill it in.", file=sys.stderr)
         return 1
+    _log_to_file(Path(config.db_path).parent / "logs" / "bb.log")
     BBBot(config).run(config.token, log_handler=None)
     return 0
 
