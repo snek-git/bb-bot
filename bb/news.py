@@ -4,7 +4,9 @@ Pure decisions only (no Discord, no network): parse the exports, group banners, 
 and turn it into short posts. The news cog fetches the data and does the sending.
 
 What gets posted:
-- an event (eventQuest) that started in the last FRESH seconds; campaigns like "AP cost 1/2" are skipped
+- an event (eventQuest) that started in the last FRESH seconds
+- the campaigns players plan around (CAMPAIGNS: podless Grand Duel, 0 AP, Great Success x3 and up), with
+  a start post only; the rest ("AP cost 1/2", bond up, one servant's EXP) are skipped
 - banners (Saint Quartz and paid ones) that opened in the last FRESH seconds, grouped by campaign
 - "2 days left" and "last day" for events and banner groups that run at most LONG seconds. Longer ones
   (story chapters, the trial quest) end on a placeholder date far in the future, so they only get the
@@ -48,6 +50,7 @@ SERVANTS_URL = f"{EXPORT}/basic_servant_lang_en.json"
 EVENT_PAGE = f"https://apps.atlasacademy.io/db/{REGION}/event/{{id}}"
 EVENT_API = f"https://api.atlasacademy.io/nice/{REGION}/event/{{id}}"  # has the event's banner image
 WAR_API = f"https://api.atlasacademy.io/nice/{REGION}/war/{{id}}"  # has its quests' close times
+QUEST_API = f"https://api.atlasacademy.io/nice/{REGION}/quest/{{id}}"  # has the war a quest is in
 BANNER_ART = f"https://static.atlasacademy.io/{REGION}/SummonBanners/img_summon_{{id}}.png"
 OFFICIAL_NEWS = "https://news.fate-go.jp/"  # the official JP news list, newest first, 10 a page
 OFFICIAL_PAGES = 2  # an event that started a few days ago can be on page 2 already
@@ -91,21 +94,45 @@ _POSTED = re.compile(r"^/(\d{4})/(\d{2})/")
 OPENED = "開幕"  # in the title of the article an event opens with
 PREVIEW = "【予告】"  # the "coming soon" article, posted days before
 
+# Campaigns worth a post, by name. Most campaigns are "AP cost 1/2", bond-up or one servant's EXP, which
+# nobody plans around, so only these get one. The English export translates some names ("0 AP Cost!"),
+# so both spellings are matched. Campaigns get a start post only, no end reminders.
+PODLESS, ZERO_AP, GREAT_SUCCESS = "podless", "zero_ap", "great_success"
+CAMPAIGN_TYPES = {"questCampaign", "combineCampaign", "svtequipCombineCampaign"}
+CAMPAIGNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    (PODLESS, re.compile(r"ストーム・ポッド消費なし")),
+    (ZERO_AP, re.compile(r"消費AP0|^0 AP Cost")),
+    (GREAT_SUCCESS, re.compile(r"大成功.*率[3-9]倍")),  # x2 comes with nearly every event
+)
+# The Grand Duel war a quest is in, "冠位戴冠戦 ライダー": the class goes in the podless post.
+CLASSES = {
+    "セイバー": "Saber", "アーチャー": "Archer", "ランサー": "Lancer", "ライダー": "Rider",
+    "キャスター": "Caster", "アサシン": "Assassin", "バーサーカー": "Berserker", "エクストラ": "Extra",
+}
+MAX_ZERO_AP_NAMED = 30  # a 0 AP campaign on more quests than this covers several wars: just count them
+
 START, SOON, LAST = "start", "soon", "last"
 Mark = tuple[str, str]  # (item key, phase)
 
 
 @dataclass(frozen=True)
 class Event:
+    """An event, or one of the campaigns worth a post (kind: one of CAMPAIGNS' kinds)."""
+
     id: int
     name: str
     start: float
     end: float
     war_ids: tuple[int, ...] = ()
+    kind: str = "event"
 
     @property
     def key(self) -> str:
         return f"event:{self.id}"
+
+    @property
+    def is_campaign(self) -> bool:
+        return self.kind != "event"
 
 
 @dataclass(frozen=True)
@@ -144,11 +171,13 @@ class Group:
 @dataclass(frozen=True)
 class EventPage:
     """What an event's own API page adds to the exports: its banner, what kind of event it is (labels
-    from EVENT_KINDS) and the servants who join for free (welfare servants)."""
+    from EVENT_KINDS), the servants who join for free (welfare servants) and, for a campaign, the quests
+    it covers."""
 
     art: str | None = None
     kinds: tuple[str, ...] = ()
     free: tuple[int, ...] = ()
+    quests: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -181,12 +210,21 @@ def _flat(text: str) -> str:
     return " ".join(text.split())
 
 
+def campaign_kind(item: dict[str, Any]) -> str | None:
+    """Which of CAMPAIGNS an export entry is, or None for the ones not worth a post."""
+    if item.get("type") not in CAMPAIGN_TYPES:
+        return None
+    return next((kind for kind, pattern in CAMPAIGNS if pattern.search(item.get("name") or "")), None)
+
+
 def parse_events(raw: Iterable[dict[str, Any]]) -> list[Event]:
-    """eventQuest entries only. The export lists some events twice (same name and start): keep one."""
+    """eventQuest entries and the campaigns worth a post. The export lists some twice (same name and
+    start: an event, or a Great Success campaign for servants and one for CEs): keep one."""
     seen: set[tuple[str, float]] = set()
     events = []
     for item in raw:
-        if item.get("type") != "eventQuest":
+        kind = "event" if item.get("type") == "eventQuest" else campaign_kind(item)
+        if kind is None:
             continue
         event = Event(
             int(item["id"]),
@@ -194,6 +232,7 @@ def parse_events(raw: Iterable[dict[str, Any]]) -> list[Event]:
             float(item["startedAt"]),
             float(item["endedAt"]),
             tuple(int(i) for i in item.get("warIds") or ()),
+            kind,
         )
         if (event.name, event.start) in seen:
             continue
@@ -225,7 +264,24 @@ def parse_event_page(body: dict[str, Any]) -> EventPage:
         kinds[kinds.index("Box gacha")] = "Box gacha (unlimited)"
     joins = body.get("svts") or ()
     free = tuple(dict.fromkeys(int(s["svtId"]) for s in joins if s.get("type") in FREE_JOINS))
-    return EventPage(body.get("banner") or body.get("noticeBanner") or None, tuple(kinds), free)
+    quests = tuple(int(q["questId"]) for q in body.get("campaignQuests") or () if not q.get("isExcepted"))
+    return EventPage(body.get("banner") or body.get("noticeBanner") or None, tuple(kinds), free, quests)
+
+
+def campaign_target(event: Event, page: EventPage, war: str | None) -> str:
+    """What a campaign covers, for its post: the class for podless ("Rider", from the Grand Duel war of
+    its first quest, "冠位戴冠戦 ライダー"), the war or the number of quests for 0 AP. war: that first
+    quest's war name, None if it couldn't be looked up."""
+    if event.kind == PODLESS and war:
+        label = war.split()[-1]
+        for jp, en in CLASSES.items():
+            label = label.replace(jp, en)
+        return label
+    if event.kind == ZERO_AP and page.quests:
+        if war and len(page.quests) <= MAX_ZERO_AP_NAMED:
+            return war
+        return f"{len(page.quests)} quests"
+    return ""
 
 
 def parse_official_news(page: str) -> list[Article]:
@@ -364,7 +420,7 @@ def due(
     endings: list[tuple[float, Notice]] = []
 
     for event in sorted(events, key=lambda e: e.start):
-        phase = _ending_phase(event.start, event.end, ts)
+        phase = None if event.is_campaign else _ending_phase(event.start, event.end, ts)
         if _is_fresh(event.start, event.end, ts) and (event.key, START) not in done:
             # a late start post already says when it ends, so an open reminder is covered too
             marks = [(event.key, START), *_ending_marks(event.key, phase)]
@@ -372,7 +428,7 @@ def due(
         elif phase and (event.key, phase) not in done:
             endings.append((event.end, Notice(event_ending(event, phase), _ending_marks(event.key, phase))))
 
-    event_ends = [e.end for e in events if e.end - e.start <= LONG]
+    event_ends = [e.end for e in events if e.end - e.start <= LONG and not e.is_campaign]
     for group in sorted(groups, key=lambda g: min(b.start for b in g.banners)):
         new = [b for b in group.banners if _is_fresh(b.start, b.end, ts) and (b.key, START) not in done]
         if new:
@@ -410,7 +466,8 @@ def live(events: list[Event], groups: list[Group], servants: dict[int, Servant],
 
 
 def start_notice(event: Event, marks: list[Mark] | None = None) -> Notice:
-    return Notice(event_start(event), marks or [], event=event)
+    text = campaign_start(event) if event.is_campaign else event_start(event)
+    return Notice(text, marks or [], event=event)
 
 
 def banner_notice(
@@ -454,6 +511,17 @@ def event_start(
     if event.end - event.start <= LONG:
         lines.append(_ends(event.end))
     return "\n".join(lines)
+
+
+def campaign_start(event: Event, target: str = "") -> str:
+    """'**Podless Grand Duel** · Rider', then when it ends. target: what it covers (campaign_target)."""
+    if event.kind == GREAT_SUCCESS:
+        times = re.search(r"([3-9])倍", event.name)
+        head = strings.line("news.great_success", times=times[1] if times else "?", name=_event_link(event))
+    else:
+        key = "news.podless" if event.kind == PODLESS else "news.zero_ap"
+        head = strings.line(key, target=target or _event_link(event))
+    return head + "\n" + _ends(event.end)
 
 
 def event_details(page: EventPage, servants: dict[int, Servant]) -> str:

@@ -210,6 +210,22 @@ news.rerun_start:
   lines:
     - "**Rerun started** · {name}"
 
+# Campaigns. {target}: the Grand Duel class ("Rider"), or what a 0 AP campaign covers; {times}: 3, 4...
+news.podless:
+  vars: [target]
+  lines:
+    - "**Podless Grand Duel** · {target}"
+
+news.zero_ap:
+  vars: [target]
+  lines:
+    - "**0 AP quests** · {target}"
+
+news.great_success:
+  vars: [times, name]
+  lines:
+    - "**Great Success x{times}** · {name}"
+
 # Story chapters, the Grand event and other content with no real end date.
 news.new_content:
   vars: [name]
@@ -258,6 +274,22 @@ news.ends:
   vars: [when, left]
   lines:
     - "-# Ends {when} ({left})"
+
+# Shop and quest resets (bb/resets.py). {names}: "Mana Prism shop, Craftable grails".
+news.reset_soon:
+  vars: [names]
+  lines:
+    - "**Resets in a day** · {names}"
+
+news.resets_at:
+  vars: [when, left]
+  lines:
+    - "-# Resets {when} ({left})"
+
+news.reset:
+  vars: [names]
+  lines:
+    - "**Just reset** · {names}"
 
 news.preview_title:
   vars: []

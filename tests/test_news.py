@@ -61,6 +61,71 @@ def test_events_keep_event_quests_once():
     assert [(e.id, e.name) for e in events] == [(1, "Halloween 2026")]
 
 
+def test_only_campaigns_worth_a_post_are_kept():
+    events = news.parse_events([
+        event(71741, "期間限定 ストーム・ポッド消費なし！", T0, T0 + 7 * DAY, type="questCampaign"),
+        event(71732, "0 AP Cost!", T0, T0 + 16 * DAY, type="questCampaign"),  # the English export
+        event(71733, "消費AP0！", T0 + DAY, T0 + 16 * DAY, type="questCampaign"),
+        event(20295, "強化『大成功＆極大成功』率4倍！", T0, T0 + 9 * DAY, type="combineCampaign"),
+        event(30065, "強化『大成功＆極大成功』率4倍！", T0, T0 + 9 * DAY, type="svtequipCombineCampaign"),
+        event(3, "AP Cost 1/2", T0, T0 + 14 * DAY, type="questCampaign"),
+        event(4, "「ハロウィン」関連サーヴァント強化『大成功＆極大成功』率2倍！", T0, T0 + 7 * DAY,
+              type="combineCampaign"),
+        event(5, "Miyamoto Iori 2X EXP!", T0, T0 + 20 * DAY, type="combineCampaign"),
+    ])
+    assert [(e.id, e.kind) for e in events] == [
+        (71741, news.PODLESS), (71732, news.ZERO_AP), (71733, news.ZERO_AP), (20295, news.GREAT_SUCCESS),
+    ]  # the CE copy of the Great Success campaign folds into the servant one
+
+
+def _campaign(id, name, kind, days=7):
+    return news.Event(id, name, T0, T0 + days * DAY, (), kind)
+
+
+def test_campaign_posts_say_what_they_cover():
+    podless = _campaign(71741, "期間限定 ストーム・ポッド消費なし！", news.PODLESS)
+    page = news.parse_event_page({"campaignQuests": [{"questId": 94149801}, {"questId": 94149802}]})
+    target = news.campaign_target(podless, page, "冠位戴冠戦 ライダー")
+    assert news.campaign_start(podless, target).split("\n")[0] == "**Podless Grand Duel** · Rider"
+    assert news.campaign_target(podless, page, "冠位戴冠戦 エクストラⅠ") == "ExtraⅠ"
+    zero = _campaign(71732, "0 AP Cost!", news.ZERO_AP, days=16)
+    assert news.campaign_target(zero, page, "冠位戴冠戦 エクストラ") == "冠位戴冠戦 エクストラ"
+    story = news.EventPage(quests=tuple(range(636)))
+    assert news.campaign_target(zero, story, "特異点F 炎上汚染都市 冬木") == "636 quests"
+    great = _campaign(20295, "強化『大成功＆極大成功』率4倍！", news.GREAT_SUCCESS, days=9)
+    first, ends = news.campaign_start(great).split("\n")
+    assert first.startswith("**Great Success x4** · [強化『大成功＆極大成功』率4倍！](<")
+    assert ends.startswith("-# Ends <t:")
+    # the class couldn't be looked up: the post names the campaign instead
+    assert news.campaign_start(podless).startswith(f"**Podless Grand Duel** · [{PODLESS_NAME}](<")
+
+
+PODLESS_NAME = "期間限定 ストーム・ポッド消費なし！"
+PODLESS = event(71741, PODLESS_NAME, T0 - 600, T0 + 7 * DAY, type="questCampaign")
+
+
+def test_campaigns_get_a_start_post_and_no_reminders():
+    podless = PODLESS
+    (start,) = run([podless])
+    assert start.event.kind == news.PODLESS and start.marks == [("event:71741", START)]
+    assert run([podless], ts=T0 + 6.5 * DAY, done={("event:71741", START)}) == []
+
+
+async def test_campaign_posts_look_up_their_class(db):
+    podless = PODLESS
+    http = _Http(pages={
+        news.EVENT_API.format(id=71741): {"campaignQuests": [{"questId": 94149801}]},
+        news.QUEST_API.format(id=94149801): {"warLongName": "冠位戴冠戦\nライダー"},
+    })
+    cog = _cog(db, [podless], http=http)
+    await cog.bot.settings.update(1, news_channel_id=55)
+    channel = _Channel()
+    assert await cog.post_due(_guild(channel), T0) == 1
+    assert channel.sent[0].startswith("**Podless Grand Duel** · Rider\n-# Ends <t:")
+    assert channel.files == [None]  # campaigns have no picture
+    assert not any("official" in url or "fate-go" in url for _, url in http.calls)
+
+
 PLACEHOLDER = T0 + 1165 * DAY  # "until 2029"
 
 

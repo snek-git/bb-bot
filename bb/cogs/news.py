@@ -36,7 +36,7 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 
-from bb import news
+from bb import news, resets
 from bb.timeutil import now
 
 log = logging.getLogger(__name__)
@@ -63,6 +63,7 @@ class News(commands.Cog):
         self.data: Data | None = None
         self._event_pages: dict[int, news.EventPage] = {}  # event id -> its banner, type and free servants
         self._wars: dict[int, tuple[str | None, int]] = {}  # war id -> (its banner, the war above it)
+        self._quest_wars: dict[int, str | None] = {}  # quest id -> the name of its war
         self._pictures: dict[str, bytes | None] = {}  # picture URL -> its bytes (None: it doesn't exist)
         self._real_ends: dict[int, tuple[float, float | None]] = {}  # event id -> (looked up at, end)
         self._articles: list[news.Article] | None = None  # the official news list, read once per check
@@ -188,6 +189,28 @@ class News(commands.Cog):
         self._articles = articles
         return articles
 
+    async def campaign_target(self, event: news.Event) -> str:
+        """What a campaign covers (the podless class, the 0 AP quests), from its page and its first
+        quest's war. '' when that can't be looked up: the post then names the campaign instead."""
+        if event.kind == news.GREAT_SUCCESS:
+            return ""
+        page = await self.event_page(event.id)
+        if page is None or not page.quests:
+            return ""
+        return news.campaign_target(event, page, await self.quest_war(page.quests[0]))
+
+    async def quest_war(self, quest_id: int) -> str | None:
+        """The name of the war a quest is in ("冠位戴冠戦 ライダー"). A failed lookup isn't remembered."""
+        if quest_id in self._quest_wars:
+            return self._quest_wars[quest_id]
+        try:
+            body = await self._get_json(news.QUEST_API.format(id=quest_id))
+        except FETCH_ERRORS as exc:
+            log.info("news: couldn't look up quest %s: %r", quest_id, exc)
+            return None
+        self._quest_wars[quest_id] = " ".join((body.get("warLongName") or "").split()) or None
+        return self._quest_wars[quest_id]
+
     async def picture(self, url: str) -> bytes | None:
         """The picture's bytes, or None if it doesn't exist, isn't an image, or is too big to upload."""
         if url in self._pictures:
@@ -238,11 +261,14 @@ class News(commands.Cog):
                     break
 
     async def add_details(self, notices: list[news.Notice]) -> None:
-        """What the exports don't have, in place: an event post's type, free servant and official page, and
-        every post's picture, downloaded. A post with no working picture gets none."""
+        """What the exports don't have, in place: an event post's type, free servant and official page, a
+        campaign post's class or quests, and every post's picture, downloaded. A post with no working
+        picture gets none."""
         servants = self.data.servants if self.data else {}
         for notice in notices:
-            if notice.event is not None and notice.image is None:
+            if notice.event is not None and notice.event.is_campaign:
+                notice.text = news.campaign_start(notice.event, await self.campaign_target(notice.event))
+            elif notice.event is not None and notice.image is None:
                 page = await self.event_page(notice.event.id)
                 official = news.official_page(notice.event, await self.official_news())
                 notice.text = news.event_start(notice.event, page, servants, official)
@@ -276,6 +302,7 @@ class News(commands.Cog):
             return 0
         done = await self.bot.db.news_posted(guild.id)
         due = news.due(self.data.events, self.data.groups, self.data.servants, ts, done)
+        due += resets.due(ts, done)
         if not due:
             return 0
         channel = guild.get_channel_or_thread(s.news_channel_id)

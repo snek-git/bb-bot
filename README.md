@@ -14,7 +14,7 @@ What she does:
 - Checks every fixer every 10 minutes and tells admins when one breaks or comes back
 - Rotating status text with the number of links fixed in the last 24 hours
 - A weekly roundup: top poster, top site, and the Buster Brainlet of the week
-- FGO JP news from Atlas Academy's data: new events (with a link to their official news page) and banners (with their pickups and banner art), and text-only reminders 2 days and 1 day before they end, posted as replies to the start post. Ping her with `gre new` in any channel to see what's on right now
+- FGO JP news from Atlas Academy's data: new events (with a link to their official news page) and banners (with their pickups and banner art), and text-only reminders 2 days and 1 day before they end, posted as replies to the start post. Also podless Grand Duel, 0 AP and Great Success x3+ campaigns, and shop resets (Mana Prism, Rare Prism, craftable grails, Hellish Ordeal and its shop) a day before and when they happen. Ping her with `gre new` in any channel to see what's on right now
 - `/settings`, visible only to members with Manage Server
 
 The idea comes from [FixTweetBot](https://github.com/Kyrela/FixTweetBot) (MIT + Commons Clause). BB is a fresh rewrite and shares no code with it.
