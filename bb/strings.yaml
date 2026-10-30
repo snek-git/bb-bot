@@ -275,6 +275,13 @@ news.ends:
   lines:
     - "-# Ends {when} ({left})"
 
+# An official "coming soon" (【予告】) article. {name}: its English name, or its Japanese title when it
+# couldn't be translated.
+news.coming_soon:
+  vars: [name]
+  lines:
+    - "**Coming soon** · {name}"
+
 # Shop and quest resets (bb/resets.py). {names}: "Mana Prism shop, Craftable grails".
 news.reset_soon:
   vars: [names]

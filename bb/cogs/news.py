@@ -20,6 +20,10 @@ strip), then to that war's parent's. Pictures are downloaded and attached as fil
 with no working picture just goes out as text.
 
 Replies: each start post's message id is saved, and an item's "2 days left" and "last day" reply to it.
+
+Coming soon: the official news list's 【予告】 articles, read every check. Each new one is fetched once,
+summarized in English by Claude Code (bb/translate.py) and posted with its banner and link; without
+Claude Code it goes out with its Japanese title.
 """
 
 from __future__ import annotations
@@ -36,7 +40,7 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 
-from bb import news, resets
+from bb import news, resets, translate
 from bb.timeutil import now
 
 log = logging.getLogger(__name__)
@@ -67,6 +71,8 @@ class News(commands.Cog):
         self._pictures: dict[str, bytes | None] = {}  # picture URL -> its bytes (None: it doesn't exist)
         self._real_ends: dict[int, tuple[float, float | None]] = {}  # event id -> (looked up at, end)
         self._articles: list[news.Article] | None = None  # the official news list, read once per check
+        # preview article URL -> (its English summary or None, its banner): translated once, for every server
+        self._previews: dict[str, tuple[str | None, str | None]] = {}
 
     async def cog_load(self) -> None:
         self.tick.start()
@@ -189,6 +195,31 @@ class News(commands.Cog):
         self._articles = articles
         return articles
 
+    async def preview_notices(self, ts: float, done: set[news.Mark]) -> list[news.Notice]:
+        """New "coming soon" articles on the official site, in English when Claude can translate them."""
+        notices = []
+        for article in news.previews(await self.official_news(), ts, done):
+            if article.url not in self._previews:
+                page = await self.article_page(article.url)
+                summary = None
+                if page is not None and page.text:
+                    summary = await translate.summarize(news.preview_title(article), page.text)
+                log.info("news: coming soon %s, %s", article.url,
+                         f"in English: {summary!r}" if summary else "posting the Japanese title")
+                self._previews[article.url] = (summary, page.banner if page else None)
+            summary, banner = self._previews[article.url]
+            notices.append(news.preview_notice(article, summary, banner))
+        return notices
+
+    async def article_page(self, url: str) -> news.ArticlePage | None:
+        try:
+            async with self.bot.http_client.get(url) as resp:
+                resp.raise_for_status()
+                return news.parse_article(await resp.text(), url)
+        except FETCH_ERRORS as exc:
+            log.info("news: couldn't read the official article %s: %r", url, exc)
+            return None
+
     async def campaign_target(self, event: news.Event) -> str:
         """What a campaign covers (the podless class, the 0 AP quests), from its page and its first
         quest's war. '' when that can't be looked up: the post then names the campaign instead."""
@@ -302,6 +333,7 @@ class News(commands.Cog):
             return 0
         done = await self.bot.db.news_posted(guild.id)
         due = news.due(self.data.events, self.data.groups, self.data.servants, ts, done)
+        due += await self.preview_notices(ts, done)
         due += resets.due(ts, done)
         if not due:
             return 0

@@ -436,6 +436,53 @@ async def test_crashes_are_in_the_trail_too(h, db, caplog):
     assert crash.getMessage().startswith("fix 501 +") and "crashed" in crash.getMessage()
 
 
+class _Original:
+    """A user's message whose preview BB hides."""
+
+    def __init__(self, mid=500):
+        self.id, self.edits = mid, []
+        self.created_at = datetime.now(UTC)
+        self.channel = SimpleNamespace(id=CH, fetch_message=self._fetch)
+        self.embeds, self.flags = [], SimpleNamespace(suppress_embeds=True)
+
+    async def _fetch(self, mid):
+        return self
+
+    async def edit(self, **kwargs):
+        self.edits.append(kwargs)
+
+
+def _late_preview(mid=500, embeds=None):
+    embeds = [text_embed().to_dict()] if embeds is None else embeds
+    return SimpleNamespace(message_id=mid, channel_id=CH, guild_id=G, data={"embeds": embeds})
+
+
+async def test_a_late_preview_on_a_hidden_original_is_hidden_again(h, monkeypatch):
+    original = _Original()
+    h.bot.get_partial_messageable = lambda cid, guild_id=None: original.channel
+    h.cog.resuppress_delay = 0
+    await lf.LinkFix._apply_original(h.cog, original, "suppress")  # the real one, not the harness's
+    assert original.edits == [{"suppress": True}]
+    await h.cog.on_raw_message_edit(_late_preview())  # X's age-restricted card, a few seconds late
+    assert original.edits == [{"suppress": True}, {"suppress": True}]
+    # BB's own edit comes back as an update without previews: nothing to do, no loop
+    await h.cog.on_raw_message_edit(_late_preview(embeds=[]))
+    assert len(original.edits) == 2
+    monkeypatch.setattr(lf, "now", lambda: datetime.now(UTC).timestamp() + lf.LATE_PREVIEW_WINDOW + 60)
+    await h.cog.on_raw_message_edit(_late_preview())  # long after: not BB's business any more
+    assert len(original.edits) == 2
+
+
+async def test_a_preview_given_back_on_purpose_stays(h):
+    original = _Original()
+    h.bot.get_partial_messageable = lambda cid, guild_id=None: original.channel
+    h.cog.resuppress_delay = 0
+    await lf.LinkFix._apply_original(h.cog, original, "suppress")
+    h.cog.forget_hidden(500)  # the Delete button gave the original its preview back
+    await h.cog.on_raw_message_edit(_late_preview())
+    assert original.edits == [{"suppress": True}]
+
+
 def test_describe_says_what_a_preview_shows():
     assert lf.describe([image_embed().to_dict()]) == "'t' with image"
     assert lf.describe([text_embed().to_dict()]) == "'t' text only"

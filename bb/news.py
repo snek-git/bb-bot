@@ -35,9 +35,9 @@ import re
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 from zoneinfo import ZoneInfo
 
 from bb import strings
@@ -87,12 +87,17 @@ FREE_JOINS = {"join", "directJoin"}
 
 JST = ZoneInfo("Asia/Tokyo")
 # One article in the official list: <p class="date">2026.10.23</p> <p class="title">...</p> <a href="...">
-_ARTICLE = re.compile(r'<p class="title">(.*?)</p>\s*<a href="([^"]+)"', re.DOTALL)
+_ARTICLE = re.compile(
+    r'<p class="date[^"]*">\s*(\d{4})\.(\d{2})\.(\d{2})\s*</p>\s*'
+    r'<p class="title">(.*?)</p>\s*<a href="([^"]+)"',
+    re.DOTALL,
+)
 # An article's address keeps the month it was first posted in (/2026/10/re_sr_collaboration/). The date
 # in the list is when it was last updated, so it can be days after the event opened.
 _POSTED = re.compile(r"^/(\d{4})/(\d{2})/")
 OPENED = "開幕"  # in the title of the article an event opens with
 PREVIEW = "【予告】"  # the "coming soon" article, posted days before
+MAX_ARTICLE = 3000  # characters of an article sent for translation: the facts are at the top
 
 # Campaigns worth a post, by name. Most campaigns are "AP cost 1/2", bond-up or one servant's EXP, which
 # nobody plans around, so only these get one. The English export translates some names ("0 AP Cost!"),
@@ -183,11 +188,25 @@ class EventPage:
 @dataclass(frozen=True)
 class Article:
     """An article on the official news site. posted: the (year, month) it was first posted, Japan time;
-    None for pages that aren't dated (the tips page)."""
+    None for pages that aren't dated (the tips page). updated: the date the list shows, which is when it
+    was last updated."""
 
     title: str
     url: str
     posted: tuple[int, int] | None
+    updated: date | None = None
+
+    @property
+    def key(self) -> str:
+        return f"article:{urlsplit(self.url).path}"
+
+
+@dataclass(frozen=True)
+class ArticlePage:
+    """An article's own page: its text (the part worth translating) and the banner at its top."""
+
+    text: str
+    banner: str | None
 
 
 @dataclass
@@ -284,16 +303,62 @@ def campaign_target(event: Event, page: EventPage, war: str | None) -> str:
     return ""
 
 
+def _text(fragment: str) -> str:
+    return _flat(html.unescape(re.sub(r"<[^>]+>", " ", fragment)))
+
+
 def parse_official_news(page: str) -> list[Article]:
     articles = []
-    for title, href in _ARTICLE.findall(page):
+    for y, m, d, title, href in _ARTICLE.findall(page):
         posted = _POSTED.match(href)
         articles.append(Article(
             _flat(html.unescape(re.sub(r"<[^>]+>", "", title))),
             urljoin(OFFICIAL_NEWS, href),
             (int(posted[1]), int(posted[2])) if posted else None,
+            date(int(y), int(m), int(d)),
         ))
     return articles
+
+
+def parse_article(page: str, url: str) -> ArticlePage:
+    """The article's text, line breaks kept, cut at MAX_ARTICLE characters (the facts come first), and
+    the first picture in it (the event's banner)."""
+    start = page.find('<div class="article">')
+    end = page.find("</main>", start)
+    body = page[start:end] if start >= 0 else ""
+    body = re.sub(r"<(script|style)\b.*?</\1>", "", body, flags=re.DOTALL)
+    lines = [_text(part) for part in re.split(r"<br\s*/?>|</p>|</div>|</li>", body)]
+    text = "\n".join(line for line in lines if line)
+    image = re.search(r'<img[^>]+src="([^"]+)"', body)
+    return ArticlePage(text[:MAX_ARTICLE], urljoin(url, image[1]) if image else None)
+
+
+def previews(articles: Iterable[Article], ts: float, done: set[Mark]) -> list[Article]:
+    """New "coming soon" (【予告】) articles: listed in the last FRESH seconds and not posted yet. The
+    list date is the last update, so an updated preview counts as new; the mark keeps it to one post."""
+    today = datetime.fromtimestamp(ts, JST).date()
+    since = today - timedelta(seconds=FRESH)
+    return [
+        a for a in articles
+        if PREVIEW in a.title and a.updated is not None and a.updated >= since and (a.key, START) not in done
+    ]
+
+
+def preview_title(article: Article) -> str:
+    """The article's title without the 【予告】 tag: 「ぐだぐだイベント2026」開幕予定！"""
+    return article.title.replace(PREVIEW, "").strip()
+
+
+def preview_notice(article: Article, summary: str | None, banner: str | None) -> Notice:
+    """'**Coming soon** · <English name>', the key facts, the official link. summary: the English
+    translation (its first line the name, the rest the facts), or None to post the Japanese title."""
+    lines = (summary or preview_title(article)).strip().splitlines()
+    text = "\n".join([
+        strings.line("news.coming_soon", name=lines[0].strip()),
+        *(line.strip() for line in lines[1:] if line.strip()),
+        "-# " + strings.line("news.official", url=article.url),
+    ])
+    return Notice(text, [(article.key, START)], image=banner)
 
 
 def official_page(event: Event, articles: Iterable[Article]) -> str | None:

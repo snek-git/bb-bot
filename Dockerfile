@@ -25,9 +25,12 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 COPY bb ./bb
 
+# claude: Claude Code, for translating news (bb/translate.py). On mc-server compose.claude.yml mounts an
+# install at /opt/claude-code; elsewhere the link points nowhere and BB posts news untranslated.
 RUN useradd --create-home --uid 1000 bb \
     && mkdir -p /app/data \
-    && chown bb:bb /app/data
+    && chown bb:bb /app/data \
+    && ln -s /opt/claude-code/bin/claude.exe /usr/local/bin/claude
 USER bb
 VOLUME /app/data
 

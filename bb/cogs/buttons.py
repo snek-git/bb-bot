@@ -161,6 +161,9 @@ class Buttons(commands.Cog):
         otherwise the other links would show twice."""
         if channel is None or await self.bot.db.get_reposts_for_origin(origin_message_id):
             return
+        linkfix = self.bot.get_cog("LinkFix")
+        if linkfix is not None:
+            linkfix.forget_hidden(origin_message_id)  # or its preview, back on purpose, gets hidden again
         try:
             original = await channel.fetch_message(origin_message_id)
             if original.flags.suppress_embeds:

@@ -18,7 +18,8 @@ rsync -az --delete --filter 'protect .env' \
   ./ "$HOST:$DEST/"
 
 echo "== building and restarting"
-ssh "$HOST" "cd $DEST && chmod 600 .env && docker compose up -d --build 2>&1 | tail -2"
+# compose.claude.yml: Claude Code from the server's hermes user, for translating news (see that file).
+ssh "$HOST" "cd $DEST && chmod 600 .env && docker compose -f docker-compose.yml -f compose.claude.yml up -d --build 2>&1 | tail -2"
 
 echo "== waiting for BB to reconnect"
 for _ in $(seq 1 30); do

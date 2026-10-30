@@ -396,8 +396,14 @@ class LinkFix(commands.Cog):
         self._webhook_lock = asyncio.Lock()
         self._expected_deletes = RecentIds()  # originals BB deleted itself (original_action = delete)
         self._deleted_origins = RecentIds()  # originals deleted by someone while BB was working
+        # Originals whose preview BB hid -> until when a late preview on them gets hidden again (see rehide)
+        self._hidden: OrderedDict[int, float] = OrderedDict()
 
     # --- shared with sync.py --------------------------------------------------------------
+
+    def forget_hidden(self, message_id: int) -> None:
+        """The original's preview was given back on purpose (its repost was deleted): leave it be."""
+        self._hidden.pop(message_id, None)
 
     @asynccontextmanager
     async def message_lock(self, message_id: int) -> AsyncIterator[None]:
@@ -589,6 +595,9 @@ class LinkFix(commands.Cog):
         """Previews arrive as message updates; hand them to whoever waits for that repost."""
         embeds = payload.data.get("embeds")
         if not embeds:
+            return
+        if payload.message_id in self._hidden:
+            await self.rehide(payload.message_id, payload.channel_id, payload.guild_id)
             return
         waiter = self._embed_waiters.get(payload.message_id)
         watch = self._rescue_watches.get(payload.message_id)
@@ -1279,6 +1288,22 @@ class LinkFix(commands.Cog):
             return rerun.jump_url(row.guild_id, row.channel_id, row.repost_id)
         return None
 
+    async def rehide(self, message_id: int, channel_id: int, guild_id: int | None) -> None:
+        """A preview landed on an original after BB hid it (X's slow age-restricted card, say). Discord
+        drops it, but clients that got the update keep showing it until they reload. Hiding it again
+        sends them a fresh update without it. Only for LATE_PREVIEW_WINDOW after BB hid it."""
+        until = self._hidden.get(message_id)
+        if until is None or now() > until:
+            self._hidden.pop(message_id, None)
+            return
+        trail(message_id, "a late preview showed up on the original: hiding it again")
+        try:
+            channel = self.bot.get_partial_messageable(channel_id, guild_id=guild_id)
+            message = await channel.fetch_message(message_id)
+            await message.edit(suppress=True)
+        except discord.HTTPException as exc:
+            trail(message_id, "could not hide the late preview: %s", exc, level=logging.WARNING)
+
     async def _apply_original(self, message: discord.Message, action: OriginalAction) -> None:
         try:
             if action == "suppress":
@@ -1290,6 +1315,9 @@ class LinkFix(commands.Cog):
                 if fresh.embeds or not fresh.flags.suppress_embeds:
                     trail(message, "the original's preview came back: hid it again")
                     await fresh.edit(suppress=True)
+                self._hidden[message.id] = now() + LATE_PREVIEW_WINDOW
+                while len(self._hidden) > 256:
+                    self._hidden.popitem(last=False)
             elif action == "delete":
                 self._expected_deletes.add(message.id)
                 await message.delete()

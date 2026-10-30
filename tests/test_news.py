@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import date
 from types import SimpleNamespace
 
 import aiohttp
 import discord
 
-from bb import news
+from bb import news, translate
 from bb.cogs.news import Data, News
 from bb.news import DAY, LAST, SOON, START
 from bb.settings_store import SettingsStore
@@ -123,7 +124,6 @@ async def test_campaign_posts_look_up_their_class(db):
     assert await cog.post_due(_guild(channel), T0) == 1
     assert channel.sent[0].startswith("**Podless Grand Duel** · Rider\n-# Ends <t:")
     assert channel.files == [None]  # campaigns have no picture
-    assert not any("official" in url or "fate-go" in url for _, url in http.calls)
 
 
 PLACEHOLDER = T0 + 1165 * DAY  # "until 2029"
@@ -371,7 +371,8 @@ def test_official_news_is_read_from_the_list():
     articles = news.parse_official_news(OFFICIAL)
     assert len(articles) == 5
     assert articles[1] == news.Article("「冠位名代戦：タマモアリア」開幕！",
-                                       "https://news.fate-go.jp/2026/10/grand_substitute/", (2026, 10))
+                                       "https://news.fate-go.jp/2026/10/grand_substitute/", (2026, 10),
+                                       date(2026, 10, 23))
     assert news.parse_official_news(_article("2026.10.22", "TIPS集", "/info/tips/"))[0].posted is None
 
 
@@ -401,6 +402,80 @@ def test_the_official_link_goes_after_the_name():
     first = news.event_start(rerun, official=url).split("\n")[0]
     assert first == ("**Rerun started** · [復刻版:盈月剣風帖](<https://apps.atlasacademy.io/db/JP/event/80632>)"
                      " · [Official page](<https://news.fate-go.jp/2026/10/re_sr_collaboration/>)")
+
+
+GUDAGUDA_URL = "https://news.fate-go.jp/2026/10/2026gudaguda/"
+# The article as it was on 2026-10-28, trimmed to its body.
+GUDAGUDA_PAGE = """<main><div class="news_detail wrapper"><div id="news_color"><div class="article">
+<div class="title-box"><div class="date">2026.10.28</div>
+<div class="title">【予告】「ぐだぐだイベント2026」開幕予定！</div></div>
+<script src="/wp-content/themes/fgo-blog/js/hash_controll.js"></script>
+<div class="wrap"><p><img src="/wp-content/uploads/2026/10/2026gudaguda_ciwxa/top_banner.png" alt="" /></p>
+<div class="heading_ttl" id="ttl1"><div class="item_box"><div class="text_box">
+<span class="hd_text">イベント概要</span></div></div></div>
+<div class="em01"><p>2026年11月の新たな期間限定イベントとして「ぐだぐだイベント2026」を開幕予定！<br>
+本イベントの<span class="notice">参加条件は</span>
+<span class="blue_txt">メインストーリー「アフタータイムのはじまり」</span>
+<span class="notice">のクリア</span>となります。</p>
+<p><span class="diamond">◆</span><span class="strong">イベント開幕時期</span>
+<span class="diamond">◆</span><br>
+<span class="em01">2026年11月中(予定)</span></p></div></div></div></div></div></main>"""
+OCT_30 = OCT_23 + 7 * DAY
+
+
+def test_new_coming_soon_articles_are_picked():
+    articles = news.parse_official_news(OFFICIAL)
+    (guda,) = news.previews(articles, OCT_30, set())
+    assert guda.url == GUDAGUDA_URL and guda.key == "article:/2026/10/2026gudaguda/"
+    assert news.previews(articles, OCT_30, {(guda.key, START)}) == []
+    assert news.previews(articles, OCT_30 + 3 * DAY, set()) == []  # days old: no longer news
+
+
+def test_articles_give_their_text_and_banner():
+    page = news.parse_article(GUDAGUDA_PAGE, GUDAGUDA_URL)
+    assert page.banner == "https://news.fate-go.jp/wp-content/uploads/2026/10/2026gudaguda_ciwxa/top_banner.png"
+    assert "2026年11月中(予定)" in page.text and "アフタータイムのはじまり" in page.text
+    assert "hash_controll" not in page.text
+
+
+def test_coming_soon_posts_in_english_or_japanese():
+    guda = news.parse_official_news(OFFICIAL)[0]
+    english = news.preview_notice(guda, "GudaGuda Event 2026\nOpens in November 2026.", "https://x/b.png")
+    assert english.text == (
+        "**Coming soon** · GudaGuda Event 2026\nOpens in November 2026.\n"
+        f"-# [Official page](<{GUDAGUDA_URL}>)"
+    )
+    assert english.image == "https://x/b.png" and english.marks == [(guda.key, START)]
+    japanese = news.preview_notice(guda, None, None)
+    assert japanese.text.split("\n")[0] == "**Coming soon** · 「ぐだぐだイベント2026」開幕予定！"
+
+
+async def test_coming_soon_is_translated_once_and_posted_once(db, monkeypatch):
+    calls = []
+
+    async def summarize(title, text):
+        calls.append((title, text))
+        return "GudaGuda Event 2026\nOpens in November 2026. Clear The Beginning of After Time to join."
+
+    monkeypatch.setattr(translate, "summarize", summarize)
+    banner = "https://news.fate-go.jp/wp-content/uploads/2026/10/2026gudaguda_ciwxa/top_banner.png"
+    pages = {news.OFFICIAL_NEWS: OFFICIAL, GUDAGUDA_URL: GUDAGUDA_PAGE}
+    http = _Http(pages=pages, pictures={banner: PNG[:900]})
+    cog = _cog(db, http=http)
+    await cog.bot.settings.update(1, news_channel_id=55)
+    channel = _Channel()
+    assert await cog.post_due(_guild(channel), OCT_30) == 1
+    assert channel.sent[0].startswith("**Coming soon** · GudaGuda Event 2026\nOpens in November 2026.")
+    assert channel.files == [("top_banner.png", PNG[:900])]
+    assert calls[0][0] == "「ぐだぐだイベント2026」開幕予定！" and "2026年11月中" in calls[0][1]
+    cog._articles = None  # the next check
+    assert await cog.post_due(_guild(channel), OCT_30 + 900) == 0
+    assert len(calls) == 1
+
+
+async def test_translation_needs_claude_code(monkeypatch):
+    monkeypatch.setattr("shutil.which", lambda name: None)
+    assert await translate.summarize("title", "text") is None
 
 
 # --- the cog (fake guild and bot, real in-memory DB) ----------------------------------------

@@ -1,0 +1,11 @@
+# mc-server only (scripts/deploy.sh adds it): Claude Code from the hermes user's install, read-only, and
+# hermes's Claude login, so BB can translate the official "coming soon" news (bb/translate.py). The login
+# dir is writable because Claude Code saves refreshed tokens there, the same as a second session of hermes's
+# own (same uid). If it expires: `sudo -u hermes -H /home/hermes/.local/bin/claude auth login`.
+services:
+  bb:
+    volumes:
+      - /home/hermes/.local/lib/node_modules/@anthropic-ai/claude-code:/opt/claude-code:ro
+      - /home/hermes/.claude:/home/bb/.claude
+    environment:
+      DISABLE_AUTOUPDATER: "1"  # the install is read-only in here; hermes updates it
