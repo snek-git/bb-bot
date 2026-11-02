@@ -343,10 +343,40 @@ def describe(embeds: Iterable[dict[str, Any]]) -> str:
     """What a preview shows, for the logs: "'pwt (@Feli_NFN)' with image" or "... text only"."""
     parts = []
     for embed in embeds:
-        title = embed.get("title") or (embed.get("author") or {}).get("name") or embed.get("url") or "?"
-        media = [kind for kind in ("video", "image", "thumbnail") if embed.get(kind)]
+        if embed.get("type") == "components":
+            title, media = _component_preview(embed.get("components") or [])
+        else:
+            title = embed.get("title") or (embed.get("author") or {}).get("name")
+            media = [kind for kind in ("video", "image", "thumbnail") if embed.get(kind)]
+        title = title or embed.get("url") or "?"
         parts.append(f"{title[:60]!r} with {media[0]}" if media else f"{title[:60]!r} text only")
     return "; ".join(parts) or "nothing"
+
+
+def _component_preview(components: list[dict[str, Any]]) -> tuple[str | None, list[str]]:
+    """(title, media kinds) of a preview built from components, as vxreddit's are: the title is the first
+    heading, media comes from galleries and thumbnails. discord.py's Embed drops these parts, so only raw
+    message updates have them."""
+    title: str | None = None
+    media: list[str] = []
+    for component in components:
+        kind = component.get("type")
+        if kind == 10 and title is None and (text := component.get("content") or "").startswith("#"):
+            title = text.lstrip("# ").strip() or None
+        elif kind == 11:
+            media.append("thumbnail")
+        elif kind == 12:
+            for item in component.get("items") or []:
+                content_type = (item.get("media") or {}).get("content_type") or ""
+                media.append("video" if content_type.startswith("video") else "image")
+        inner = list(component.get("components") or [])
+        if component.get("accessory"):
+            inner.append(component["accessory"])  # a section's thumbnail
+        inner_title, inner_media = _component_preview(inner)
+        title = title or inner_title
+        media += inner_media
+    media.sort(key=("video", "image", "thumbnail").index)
+    return title, media
 
 
 def _parent_id(channel: Any) -> int | None:

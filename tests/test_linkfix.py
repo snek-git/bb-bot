@@ -489,6 +489,28 @@ def test_describe_says_what_a_preview_shows():
     assert lf.describe([]) == "nothing"
 
 
+def _vxreddit_preview(*extra: dict) -> dict:
+    """A vxreddit preview as Discord sends it in a raw message update (trimmed)."""
+    return {
+        "type": "components",
+        "url": "https://vxreddit.com/r/wallstreetbets/comments/1xirx7a/",
+        "components": [{"type": 17, "id": 1, "components": [
+            {"type": 10, "id": 2, "content": "-# vxReddit"},
+            {"type": 10, "id": 3, "content": "** u/imacompnerd on r/wallstreetbets **"},
+            {"type": 10, "id": 4, "content": "## $10,000,000 dollar RDDT YOLO"},
+            {"type": 10, "id": 5, "content": "This is the largest YOLO play I've ever made."},
+            *extra,
+        ]}],
+    }
+
+
+def test_describe_reads_component_previews():
+    gallery = {"type": 12, "id": 6, "items": [{"media": {"url": "https://i.redd.it/a.png",
+                                                          "content_type": "image/png"}}]}
+    assert lf.describe([_vxreddit_preview(gallery)]) == "'$10,000,000 dollar RDDT YOLO' with image"
+    assert lf.describe([_vxreddit_preview()]) == "'$10,000,000 dollar RDDT YOLO' text only"
+
+
 async def test_replacement_that_cannot_be_sent_edits_instead(h, db):
     h.embed_script = [[], [text_embed().to_dict()]]
     real_send = h.cog._send_message
