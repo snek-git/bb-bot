@@ -71,11 +71,25 @@ def _is_image_attachment(attachment: Any) -> bool:
     return filename.endswith(_IMAGE_EXTENSIONS)
 
 
-def pick_image_url(attachments: Iterable[Any], embeds: Iterable[Any]) -> str | None:
-    """The first image on a message: image attachments, then embed images, then embed thumbnails."""
+def _gallery_images(components: Iterable[Any]) -> Iterable[str]:
+    """Image URLs in media galleries (BB's own cards), walking into containers."""
+    for component in components:
+        for item in getattr(component, "items", None) or ():
+            media = getattr(item, "media", None)
+            if (getattr(media, "content_type", None) or "").startswith("image/"):
+                yield media.url
+        yield from _gallery_images(getattr(component, "children", None) or ())
+
+
+def pick_image_url(
+    attachments: Iterable[Any], embeds: Iterable[Any], components: Iterable[Any] = ()
+) -> str | None:
+    """The first image on a message: image attachments, card galleries, then embed images and thumbnails."""
     for attachment in attachments:
         if _is_image_attachment(attachment):
             return attachment.url
+    for url in _gallery_images(components):
+        return url
     embeds = list(embeds)
     for embed in embeds:
         url = getattr(getattr(embed, "image", None), "url", None)
@@ -279,7 +293,7 @@ class FindSource(commands.Cog):
 
     async def run(self, interaction: discord.Interaction, message: discord.Message) -> None:
         """Search the first image on `message` and post the answer publicly."""
-        image_url = pick_image_url(message.attachments, message.embeds)
+        image_url = pick_image_url(message.attachments, message.embeds, message.components)
         if image_url is None:
             await interaction.response.send_message(strings.line("findsource.no_image"), ephemeral=True)
             return

@@ -616,6 +616,7 @@ async def test_ping_replying_to_an_image_searches_that_image(db, fake_links):
     target = SimpleNamespace(
         attachments=[],
         embeds=[SimpleNamespace(image=SimpleNamespace(url="https://pbs/x.jpg"), thumbnail=None)],
+        components=[],
     )
     ref = SimpleNamespace(message_id=123, resolved=None)
     message = make_chat_message("<@99>", reference=ref, fetched=target)

@@ -28,6 +28,8 @@ VX = Fixer("vxtwitter", "vxTwitter", "vxtwitter.com", direct_domain="d.vxtwitter
 TWITTER = Site("twitter", "Twitter", "Tweet", (FX, VX), "https://x.com/a/status/1")
 PIXIV_FX = Fixer("phixiv", "phixiv", "phixiv.net")
 PIXIV = Site("pixiv", "Pixiv", "Pixiv", (PIXIV_FX,), "https://www.pixiv.net/artworks/1")
+IG_FX = Fixer("oginstagram", "OGInstagram", "oginstagram.com")
+INSTAGRAM = Site("instagram", "Instagram", "Instagram", (IG_FX,), "https://www.instagram.com/p/A/")
 NOON = datetime(2026, 1, 5, 12, 0, tzinfo=UTC).timestamp()
 
 
@@ -213,7 +215,8 @@ def links(monkeypatch):
     monkeypatch.setattr(resolve, "expand", fake_expand)
     monkeypatch.setattr(sites, "match", fake_match)
     monkeypatch.setattr(sites, "chain", lambda site_id, down=(): [
-        f for f in {"twitter": TWITTER, "pixiv": PIXIV}[site_id].fixers if f.id not in down
+        f for f in {"twitter": TWITTER, "pixiv": PIXIV, "instagram": INSTAGRAM}[site_id].fixers
+        if f.id not in down
     ])
     monkeypatch.setattr(sites, "fixed_url", lambda m, fixer, lang=None: f"https://{fixer.domain}/{m.canonical_key}")
     monkeypatch.setattr(views, "make_repost_view", lambda **kw: dict(kw))
@@ -372,6 +375,59 @@ async def test_happy_path_with_image(h, db):
     assert (row.status, row.fixer_id, row.original_url) == ("ok", "fxtwitter", "https://x.com/a/status/1")
     assert h.edits == []  # Find source was decided before sending: no "(edited)" on the repost
     assert h.original == [(500, "suppress")]
+
+
+@pytest.fixture
+def ig(h, links, monkeypatch):
+    """An Instagram link, with OGInstagram's note (None = no answer) and BB's card sends recorded."""
+    links["https://www.instagram.com/p/A/"] = LinkMatch(
+        site=INSTAGRAM, url="https://www.instagram.com/p/A/", canonical_key="instagram:A",
+        parts={"shortcode": "A", "kind": "p"},
+    )
+    state = SimpleNamespace(post=None, cards=[])
+
+    async def fetch_post(session, m):
+        return state.post
+
+    async def send_card(message, settings, view, cover, *, quip=None):
+        state.cards.append(view)
+        return SimpleNamespace(id=next(h.ids), embeds=[])
+
+    monkeypatch.setattr(lf.instagram, "fetch_post", fetch_post)
+    h.cog._send_card = send_card
+    return state
+
+
+async def test_instagram_gets_bbs_own_card(h, db, ig):
+    ig.post = lf.instagram.Post("egg", "Egg", "We got this", "", (lf.instagram.Media("https://o/1", False),))
+    await h.cog.process(message("https://www.instagram.com/p/A/"))
+    (card,) = ig.cards
+    assert h.sent == [] and h.waits == []  # no fixer link, nothing to wait for
+    (row,) = await db.get_reposts_for_origin(500)
+    assert (row.status, row.fixer_id, row.site) == ("ok", None, "instagram")
+    assert views.FIND_SOURCE_ID in views.component_custom_ids(card.children)
+    assert h.original == [(500, "suppress")]
+
+
+async def test_instagram_without_a_note_uses_the_fixer_link(h, db, ig):
+    h.embed_script = [[image_embed().to_dict()]]
+    await h.cog.process(message("https://www.instagram.com/p/A/"))
+    assert ig.cards == [] and "oginstagram.com/instagram:A" in h.sent[0][0]
+    (row,) = await db.get_reposts_for_origin(500)
+    assert (row.status, row.fixer_id) == ("ok", "oginstagram")
+
+
+async def test_instagram_card_discord_refuses_uses_the_fixer_link(h, db, ig):
+    ig.post = lf.instagram.Post("egg", None, "", "", (lf.instagram.Media("https://o/1", True),))
+
+    async def refuse(*args, **kwargs):
+        raise discord.HTTPException(SimpleNamespace(status=400, reason="bad"), "invalid media")
+
+    h.cog._send_card = refuse
+    h.embed_script = [[image_embed().to_dict()]]
+    await h.cog.process(message("https://www.instagram.com/p/A/"))
+    (row,) = await db.get_reposts_for_origin(500)
+    assert (row.status, row.fixer_id) == ("ok", "oginstagram")
 
 
 async def test_next_fixer_when_no_preview(h, db):

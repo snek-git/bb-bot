@@ -145,10 +145,25 @@ def make_repost_view(
     Buttons are DynamicItems registered by the buttons cog, so this view needs no timeout or state.
     """
     view = discord.ui.View(timeout=None)
-    if has_image:
-        view.add_item(FindSourceButton())
-    if site_id == "twitter" if translatable is None else translatable:
-        view.add_item(TranslateButton(translated))
-    if SHOW_DELETE:
-        view.add_item(DeleteButton(origin_author_id))
+    for item in repost_buttons(
+        origin_author_id=origin_author_id,
+        has_image=has_image,
+        translatable=site_id == "twitter" if translatable is None else translatable,
+        translated=translated,
+    ):
+        view.add_item(item)
     return view
+
+
+def repost_buttons(
+    *, origin_author_id: int, has_image: bool, translatable: bool = False, translated: bool = False
+) -> list[discord.ui.Item[Any]]:
+    """The buttons on their own, for cards that put them in their own action row."""
+    items: list[discord.ui.Item[Any]] = []
+    if has_image:
+        items.append(FindSourceButton())
+    if translatable:
+        items.append(TranslateButton(translated))
+    if SHOW_DELETE:
+        items.append(DeleteButton(origin_author_id))
+    return items

@@ -24,7 +24,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from bb import ehentai, nhentai, render, rerun, strings, upload, views
+from bb import ehentai, instagram, nhentai, render, rerun, strings, upload, views
 from bb.cards import Cover
 from bb.db import PostRow, RepostRow
 from bb.fixlog import trail
@@ -315,6 +315,7 @@ class LiveRepost:
     settings: GuildSettings | None = None
     view: Any = None
     media: tuple[str, ...] = ()  # a mixed tweet's media kinds: one preview per item
+    card: bool = False  # BB's own card (Instagram): nothing to wait for, it's settled when sent
 
 
 # Attachments are rebuilt for every send attempt: discord.py closes a File once a send ends, even a
@@ -877,6 +878,14 @@ class LinkFix(commands.Cog):
     ) -> LiveRepost | None:
         guild = message.guild
         assert guild is not None
+        if m.site.id == "instagram":
+            post = await instagram.fetch_post(self.bot.http_client, m)
+            card = None
+            if post is not None:
+                card = await self._send_instagram_card(message, settings, m, post, quip, is_rerun=is_rerun)
+            if card is not None or message.id in self._deleted_origins:
+                return card
+            trail(message, "no Instagram card for %s, using the fixer link", m.canonical_key)
         tweet = await self._tweet_info(m) if m.site.id == "twitter" else None
         fixers = list(sites.chain(m.site.id, self.bot.down_fixers))
         first = fixers[0] if fixers else None
@@ -926,8 +935,54 @@ class LinkFix(commands.Cog):
             return None
         return repost
 
+    async def _send_instagram_card(
+        self,
+        message: discord.Message,
+        settings: GuildSettings,
+        m: LinkMatch,
+        post: instagram.Post,
+        quip: str | None,
+        *,
+        is_rerun: bool,
+    ) -> LiveRepost | None:
+        guild = message.guild
+        assert guild is not None
+        buttons = views.repost_buttons(origin_author_id=message.author.id, has_image=post.has_image)
+        view = instagram.build_card(post, m, buttons=buttons, quip=quip)
+        try:
+            sent = await self._send_card(message, settings, view, None, quip=quip)
+        except discord.HTTPException as exc:
+            trail(message, "could not send the Instagram card for %s: %s", m.canonical_key, exc,
+                  level=logging.WARNING)
+            return None
+        trail(message, "sent Instagram card %s for %s (%d media)", sent.id, m.canonical_key, len(post.media))
+        row = RepostRow(
+            repost_id=sent.id,
+            guild_id=guild.id,
+            channel_id=message.channel.id,
+            origin_message_id=message.id,
+            origin_author_id=message.author.id,
+            site=m.site.id,
+            canonical_key=m.canonical_key,
+            original_url=m.url,
+            spoiler=m.spoiler,
+            quip=quip,
+            status="ok",
+        )
+        await self.bot.db.insert_repost(row)
+        repost = LiveRepost(
+            row=row, match=m, chain=[], sent=Sent(message=sent), is_rerun=is_rerun,
+            max_bytes=guild.filesize_limit, origin=message, settings=settings, view=view, card=True,
+        )
+        if message.id in self._deleted_origins:
+            await self._drop(repost)
+            return None
+        return repost
+
     async def _settle(self, repost: LiveRepost) -> str:
         """Wait for the preview, walk the fixer chain, then upload or give up. Returns the final status."""
+        if repost.card:
+            return "ok"
         try:
             return await self._walk_chain(repost)
         except (discord.NotFound, RepostGone):

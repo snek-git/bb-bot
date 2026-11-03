@@ -113,7 +113,7 @@ class Chat(commands.Cog):
                 target = await message.channel.fetch_message(ref.message_id)
             except discord.HTTPException:
                 return None
-        return pick_image_url(target.attachments, target.embeds)
+        return pick_image_url(target.attachments, target.embeds, target.components)
 
     async def post_news(self, message: discord.Message) -> None:
         """What's running in FGO JP right now, the same posts as "What's on now" in /settings, with their

@@ -6,6 +6,7 @@ What she does:
 
 - Fixes links automatically, one repost per link, with backup fixers when a preview doesn't show up
 - Downloads and uploads the media herself when every fixer fails
+- Instagram links get her own card (from OGInstagram's data): the caption without its hashtag pile, then the media
 - Hides the original's preview (or deletes the original, or leaves it alone; per server)
 - Deletes or updates her reposts when the original is deleted or edited
 - Reposts show just the preview, a small "Tweet" (or "Pixiv", ...) link to the original, and Find source / Translate buttons

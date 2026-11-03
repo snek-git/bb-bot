@@ -163,6 +163,21 @@ def test_pick_image_url_order():
     assert fs.pick_image_url([attachment("https://a/doc.txt", "text/plain")], [embed()]) is None
 
 
+def image_message():
+    return SimpleNamespace(attachments=[], embeds=[embed(image=IMG)], components=[])
+
+
+def test_pick_image_url_reads_card_galleries():
+    def item(url, kind):
+        return SimpleNamespace(media=SimpleNamespace(url=url, content_type=kind))
+
+    gallery = SimpleNamespace(items=[item("https://o/1", "video/mp4"), item("https://o/2", "image/jpeg")])
+    card = [SimpleNamespace(children=[SimpleNamespace(content="text"), gallery])]
+    assert fs.pick_image_url([], [embed(image="https://e/img")], card) == "https://o/2"
+    video_only = [SimpleNamespace(children=[SimpleNamespace(items=[item("https://o/1", "video/mp4")])])]
+    assert fs.pick_image_url([], [], video_only) is None
+
+
 # --- the request ------------------------------------------------------------------------
 
 
@@ -230,7 +245,7 @@ def make_interaction(user_id=None):
 
 async def test_run_without_image_answers_privately():
     interaction = make_interaction()
-    await make_cog().run(interaction, SimpleNamespace(attachments=[], embeds=[]))
+    await make_cog().run(interaction, SimpleNamespace(attachments=[], embeds=[], components=[]))
     args, kwargs = interaction.response.send_message.await_args
     assert args[0] in strings.variants("findsource.no_image") and kwargs["ephemeral"] is True
     interaction.followup.send.assert_not_awaited()
@@ -240,7 +255,7 @@ async def test_run_posts_results_publicly_and_caches(monkeypatch):
     search = AsyncMock(return_value=fs.parse_saucenao(RESPONSE))
     monkeypatch.setattr(fs, "search_saucenao", search)
     cog = make_cog()
-    message = SimpleNamespace(attachments=[], embeds=[embed(image=IMG)])
+    message = image_message()
     for _ in range(2):
         interaction = make_interaction()
         await cog.run(interaction, message)
@@ -256,7 +271,7 @@ async def test_run_without_key_only_links(monkeypatch):
     search = AsyncMock()
     monkeypatch.setattr(fs, "search_saucenao", search)
     interaction = make_interaction()
-    await make_cog(key=None).run(interaction, SimpleNamespace(attachments=[], embeds=[embed(image=IMG)]))
+    await make_cog(key=None).run(interaction, image_message())
     search.assert_not_awaited()
     interaction.response.defer.assert_not_awaited()  # nothing to wait for: answer straight away
     args, kwargs = interaction.response.send_message.await_args
@@ -269,7 +284,7 @@ async def test_one_search_per_person_per_cooldown(monkeypatch):
     search = AsyncMock(return_value=fs.parse_saucenao(RESPONSE))
     monkeypatch.setattr(fs, "search_saucenao", search)
     cog = make_cog()
-    message = SimpleNamespace(attachments=[], embeds=[embed(image=IMG)])
+    message = image_message()
     first, second, other = make_interaction(7), make_interaction(7), make_interaction(8)
     for interaction in (first, second, other):
         await cog.run(interaction, message)
@@ -284,7 +299,7 @@ async def test_paused_bb_does_not_search(monkeypatch):
     search = AsyncMock()
     monkeypatch.setattr(fs, "search_saucenao", search)
     interaction = make_interaction()
-    await make_cog(paused=True).run(interaction, SimpleNamespace(attachments=[], embeds=[embed(image=IMG)]))
+    await make_cog(paused=True).run(interaction, image_message())
     search.assert_not_awaited()
     args, kwargs = interaction.response.send_message.await_args
     assert args[0] in strings.variants("findsource.paused") and kwargs["ephemeral"] is True
@@ -302,7 +317,7 @@ async def test_failed_lookup_is_not_cached(monkeypatch):
 async def test_failed_search_says_so(monkeypatch):
     monkeypatch.setattr(fs, "search_saucenao", AsyncMock(return_value=None))
     interaction = make_interaction()
-    await make_cog().run(interaction, SimpleNamespace(attachments=[], embeds=[embed(image=IMG)]))
+    await make_cog().run(interaction, image_message())
     args, _ = interaction.followup.send.await_args
     assert args[0] in strings.variants("findsource.manual")
 
