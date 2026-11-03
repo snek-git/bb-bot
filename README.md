@@ -1,6 +1,6 @@
 # BB
 
-A Discord bot for the /fgog/ server. When someone posts a Twitter/X, Pixiv, Reddit, TikTok, Bluesky or Instagram link, BB reposts it through a fixer service (FxTwitter, phixiv and friends) so the preview actually works, and hides the broken preview on the original. She does it in character: bratty, smug, Senpai-obsessed. Every line she says lives in `bb/strings.yaml`.
+A Discord bot for the /fgog/ server. When someone posts a Twitter/X, Pixiv, Reddit, TikTok, Bluesky or Instagram link, BB reposts it through a fixer service (FxTwitter, phixiv and friends) so the preview actually works, and hides the broken preview on the original.
 
 What she does:
 
