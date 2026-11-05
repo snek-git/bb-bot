@@ -529,6 +529,20 @@ async def test_a_late_preview_on_a_hidden_original_is_hidden_again(h, monkeypatc
     assert len(original.edits) == 2
 
 
+async def test_a_preview_landing_while_bb_rechecks_is_hidden_again(h, monkeypatch):
+    """X's preview reaches clients right after the first hide, before the re-check (it then finds the
+    message clean, so only the late-preview watch can catch it)."""
+    original = _Original()
+    h.bot.get_partial_messageable = lambda cid, guild_id=None: original.channel
+
+    async def preview_during_the_wait(delay):
+        await h.cog.on_raw_message_edit(_late_preview())
+
+    monkeypatch.setattr(lf.asyncio, "sleep", preview_during_the_wait)
+    await lf.LinkFix._apply_original(h.cog, original, "suppress")
+    assert original.edits == [{"suppress": True}, {"suppress": True}]
+
+
 async def test_a_preview_given_back_on_purpose_stays(h):
     original = _Original()
     h.bot.get_partial_messageable = lambda cid, guild_id=None: original.channel

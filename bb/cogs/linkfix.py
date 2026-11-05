@@ -1392,6 +1392,11 @@ class LinkFix(commands.Cog):
     async def _apply_original(self, message: discord.Message, action: OriginalAction) -> None:
         try:
             if action == "suppress":
+                # Watched from before the edit: a preview landing during the re-check below reaches
+                # clients but not the fetched message, so only rehide catches it.
+                self._hidden[message.id] = now() + LATE_PREVIEW_WINDOW
+                while len(self._hidden) > 256:
+                    self._hidden.popitem(last=False)
                 await message.edit(suppress=True)
                 trail(message, "every repost worked: hid the original's preview")
                 # Previews that were still resolving can come back after the first suppress.
@@ -1400,15 +1405,13 @@ class LinkFix(commands.Cog):
                 if fresh.embeds or not fresh.flags.suppress_embeds:
                     trail(message, "the original's preview came back: hid it again")
                     await fresh.edit(suppress=True)
-                self._hidden[message.id] = now() + LATE_PREVIEW_WINDOW
-                while len(self._hidden) > 256:
-                    self._hidden.popitem(last=False)
             elif action == "delete":
                 self._expected_deletes.add(message.id)
                 await message.delete()
                 trail(message, "every repost worked: deleted the original (server setting)")
         except discord.HTTPException as exc:
             self._expected_deletes.consume(message.id)
+            self._hidden.pop(message.id, None)
             if not isinstance(exc, discord.NotFound):
                 trail(message, "could not %s the original: %s", action, exc, level=logging.WARNING)
 
