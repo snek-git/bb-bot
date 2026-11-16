@@ -317,7 +317,7 @@ def test_fixed_url_ignores_lang_when_not_translatable() -> None:
 
 
 def test_chain_configured_order() -> None:
-    assert [f.id for f in sites.chain("twitter")] == ["fxtwitter", "vxtwitter", "fixupx"]
+    assert [f.id for f in sites.chain("twitter")] == ["bbtwitter", "fxtwitter", "vxtwitter", "fixupx"]
     assert [f.id for f in sites.chain("pixiv")] == ["phixiv", "ppxiv"]
     assert [f.id for f in sites.chain("reddit")] == ["vxreddit", "redditez"]
     assert [f.id for f in sites.chain("tiktok")] == ["fxtiktok", "tfxktok", "tiktokez"]
@@ -326,11 +326,13 @@ def test_chain_configured_order() -> None:
 
 
 def test_chain_moves_down_fixers_last() -> None:
-    assert [f.id for f in sites.chain("twitter", {"fxtwitter"})] == ["vxtwitter", "fixupx", "fxtwitter"]
+    got = sites.chain("twitter", {"bbtwitter"})
+    assert [f.id for f in got] == ["fxtwitter", "vxtwitter", "fixupx", "bbtwitter"]
     got = sites.chain("twitter", ["fixupx", "fxtwitter"])
-    assert [f.id for f in got] == ["vxtwitter", "fxtwitter", "fixupx"]
-    everything = {"fxtwitter", "vxtwitter", "fixupx"}
-    assert [f.id for f in sites.chain("twitter", everything)] == ["fxtwitter", "vxtwitter", "fixupx"]
+    assert [f.id for f in got] == ["bbtwitter", "vxtwitter", "fxtwitter", "fixupx"]
+    everything = {"bbtwitter", "fxtwitter", "vxtwitter", "fixupx"}
+    got = sites.chain("twitter", everything)
+    assert [f.id for f in got] == ["bbtwitter", "fxtwitter", "vxtwitter", "fixupx"]
     # down fixers from other sites don't matter
     assert [f.id for f in sites.chain("pixiv", {"fxtwitter", "ppxiv"})] == ["phixiv", "ppxiv"]
 

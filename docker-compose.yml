@@ -6,6 +6,9 @@ services:
     env_file: .env
     volumes:
       - bb-data:/app/data
+    # BBTwitter (bb/bbtwitter.py), for nginx on the host only: nginx serves it as bbtwitter.snek.page.
+    ports:
+      - "127.0.0.1:8091:8091"
     # Hard caps so a big video download in the upload fallback can never push the host into
     # killing something else (like the Minecraft server). Over the cap, only BB gets restarted.
     mem_limit: 512m

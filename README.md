@@ -114,6 +114,11 @@ scripts/deploy.sh
 Runs lint and tests, copies the project (including `.env`) to `mc-server:/opt/bb-bot`, rebuilds the
 container, and waits until BB is back on Discord. `BB_HOST` / `BB_DEST` change the target.
 
+**BBTwitter:** tweet links go out as `bbtwitter.snek.page`, which is BB herself (`bb/bbtwitter.py`, port 8091 on
+the host's loopback) passing FxTwitter's previews along under her name and icon. nginx serves the address; its
+site is `scripts/nginx-bbtwitter.conf`, with HTTPS from certbot. If it's ever down, the health check notices
+and tweets fall back to FxTwitter.
+
 **Logs:** besides `docker compose logs`, BB writes `/app/data/logs/bb.log` in the `bb-data` volume (10
 files of 5 MB), so the logs survive a deploy. Every step of a link fix logs a line starting with
 `fix <message id>`, so to see why a link was or wasn't fixed, copy the message's id and run:

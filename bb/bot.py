@@ -8,7 +8,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from bb import nhentai, render, strings, tweetcard, upload
+from bb import bbtwitter, nhentai, render, strings, tweetcard, upload
 from bb.config import Config
 from bb.db import Database
 from bb.settings_store import SettingsStore
@@ -54,6 +54,8 @@ class BBBot(commands.Bot):
         # Fixer ids the health checker currently considers down. Owned by cogs.health.
         self.down_fixers: set[str] = set()
         self.http_session: aiohttp.ClientSession | None = None
+        # BBTwitter's web endpoint (bb/bbtwitter.py): started in setup_hook, never by --check.
+        self.bbtwitter: bbtwitter.Server | None = None
         strings.set_emojis(config.emojis)
         render.set_style(config.link_style)
         nhentai.set_api_key(config.nhentai_key)
@@ -88,6 +90,8 @@ class BBBot(commands.Bot):
             synced = await self.tree.sync()
             log.info("synced %d global commands", len(synced))
         await self._load_app_emojis()
+        self.bbtwitter = bbtwitter.Server(self.http_client)
+        await self.bbtwitter.start()
 
     async def _load_app_emojis(self) -> None:
         """The app's own emojis (Developer Portal -> Emojis) BB looks up by name: the tweet card's icon."""
@@ -104,6 +108,9 @@ class BBBot(commands.Bot):
         return
 
     async def close(self) -> None:
+        if self.bbtwitter is not None:
+            await self.bbtwitter.stop()
+            self.bbtwitter = None
         if self.http_session is not None:
             await self.http_session.close()
             self.http_session = None
