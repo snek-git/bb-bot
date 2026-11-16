@@ -53,7 +53,7 @@ CREATE TABLE IF NOT EXISTS reposts (
     translated        INTEGER NOT NULL DEFAULT 0,
     status            TEXT    NOT NULL DEFAULT 'pending',  -- pending | ok | uploaded | failed
     created_at        REAL    NOT NULL,
-    media             TEXT    NOT NULL DEFAULT ''  -- "photo,video": a mixed tweet, one preview per item
+    media             TEXT    NOT NULL DEFAULT ''  -- "photo,video", "gif,gif": one preview per item
 );
 CREATE INDEX IF NOT EXISTS reposts_by_origin ON reposts (origin_message_id);
 CREATE INDEX IF NOT EXISTS reposts_by_time ON reposts (created_at);

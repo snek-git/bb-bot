@@ -69,7 +69,7 @@ def format_repost(
     more: Sequence[tuple[str, str]] = (),
 ) -> str:
     """The repost text: a link to the fixer URL (previewed) plus the quip, if any. more: extra
-    (label, URL) previews for a tweet that mixes photos and videos, one per item."""
+    (label, URL) previews for a tweet with a video and other items, one per item."""
     extra = [_spoiler(f"[{label}]({md_url(url)})", m.spoiler) for label, url in more]
     fixed = md_url(fixed)
     if (style or _style) == "subtle":
@@ -89,7 +89,7 @@ def repost_text(
     lang: str | None = None,
     style: Style | None = None,
 ) -> str:
-    """format_repost for a fixer, with one preview per item when the tweet mixes photos and videos."""
+    """format_repost for a fixer, with one preview per item when the tweet has a video and other items."""
     (_, first), *rest = sites.media_links(m, fixer, media, lang)
     return format_repost(m, fixer.name, first, quip, style, more=rest)
 

@@ -14,6 +14,7 @@ import discord
 import pytest
 
 from bb import strings, upload, views
+from bb.cards import Cover
 from bb.cogs import linkfix as lf
 from bb.cogs.sync import Sync, content_changed
 from bb.db import RepostRow
@@ -430,6 +431,86 @@ async def test_instagram_card_discord_refuses_uses_the_fixer_link(h, db, ig):
     assert (row.status, row.fixer_id) == ("ok", "oginstagram")
 
 
+def fx_tweet(*sizes, kind="photo"):
+    """FxTwitter's answer for a tweet with one item per (width, height)."""
+    return {
+        "url": "https://x.com/a/status/1", "id": "1", "text": "shelf", "lang": "en",
+        "author": {"screen_name": "a", "name": "A"},
+        "media": {"all": [
+            {"type": kind, "url": f"https://pbs.twimg.com/media/{n}.jpg", "width": w, "height": h}
+            for n, (w, h) in enumerate(sizes)
+        ]},
+    }
+
+
+@pytest.fixture
+def xcard(h, monkeypatch):
+    """BB's tweet card sends recorded, and the joined strip row (None = couldn't be had)."""
+    state = SimpleNamespace(cover=None, cards=[])
+
+    async def strip_cover(session, tweet, max_bytes):
+        return state.cover if lf.tweetcard.is_strip_row(tweet.media) else None
+
+    async def send_card(message, settings, view, cover, *, quip=None):
+        state.cards.append((view, cover))
+        return SimpleNamespace(id=next(h.ids), embeds=[])
+
+    monkeypatch.setattr(lf.tweetcard, "strip_cover", strip_cover)
+    h.cog._send_card = send_card
+    return state
+
+
+def gallery_urls(view):
+    (container,) = [item for item in view.children if isinstance(item, discord.ui.Container)]
+    return [[item.media.url for item in gallery.items]
+            for gallery in container.children if isinstance(gallery, discord.ui.MediaGallery)]
+
+
+async def test_tweet_with_more_than_four_pictures_gets_bbs_card(h, db, xcard):
+    h.tweet_info = fx_tweet(*[(1200, 800)] * 12)
+    await h.cog.process(message("https://x.com/a/status/1"))
+    ((view, cover),) = xcard.cards
+    assert h.sent == [] and h.waits == [] and cover is None
+    assert [len(urls) for urls in gallery_urls(view)] == [10, 2]  # every picture, 10 to a gallery
+    (row,) = await db.get_reposts_for_origin(500)
+    assert (row.status, row.fixer_id, row.site) == ("ok", None, "twitter")
+    assert h.original == [(500, "suppress")]
+
+
+async def test_strip_row_is_joined_into_one_picture(h, db, xcard):
+    xcard.cover = Cover(b"jpeg", "row.jpg")
+    h.tweet_info = fx_tweet(*[(52, 1195)] * 17)
+    await h.cog.process(message("https://x.com/a/status/1"))
+    ((view, cover),) = xcard.cards
+    assert cover is xcard.cover and gallery_urls(view) == [["attachment://row.jpg"]]
+
+
+async def test_short_strip_row_that_cant_be_joined_uses_the_fixer_link(h, db, xcard):
+    h.tweet_info = fx_tweet(*[(52, 1195)] * 3)
+    h.embed_script = [[image_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1"))
+    assert xcard.cards == [] and "fxtwitter.com/twitter:1" in h.sent[0][0]
+
+
+async def test_four_pictures_keep_the_fixer_link(h, db, xcard):
+    h.tweet_info = fx_tweet(*[(1200, 800)] * 4)
+    h.embed_script = [[image_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1"))
+    assert xcard.cards == [] and h.sent[0][0].endswith("[FxTwitter](https://fxtwitter.com/twitter:1)")
+
+
+async def test_tweet_card_discord_refuses_uses_the_fixer_link(h, db, xcard):
+    async def refuse(*args, **kwargs):
+        raise discord.HTTPException(SimpleNamespace(status=400, reason="bad"), "invalid media")
+
+    h.cog._send_card = refuse
+    h.tweet_info = fx_tweet(*[(1200, 800)] * 6)
+    h.embed_script = [[image_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1"))
+    (row,) = await db.get_reposts_for_origin(500)
+    assert (row.status, row.fixer_id) == ("ok", "fxtwitter")
+
+
 async def test_next_fixer_when_no_preview(h, db):
     h.embed_script = [[], [text_embed().to_dict()]]
     await h.cog.process(message("https://x.com/a/status/1"))
@@ -660,15 +741,29 @@ async def test_failed_replacement_upload_edits_with_fresh_files(h, db, monkeypat
     file.close()
 
 
-def test_mixed_media():
+def test_split_media():
     def tweet_with(*kinds):
         return {"media": {"all": [{"type": kind} for kind in kinds]}}
 
-    assert lf.mixed_media(tweet_with("photo", "video")) == ("photo", "video")
-    assert lf.mixed_media(tweet_with("gif", "photo", "photo")) == ("gif", "photo", "photo")
-    assert lf.mixed_media(tweet_with("photo", "photo")) == ()  # an image gallery works as it is
-    assert lf.mixed_media(tweet_with("video")) == ()
-    assert lf.mixed_media(None) == () and lf.mixed_media({}) == ()
+    assert lf.split_media(tweet_with("photo", "video")) == ("photo", "video")
+    assert lf.split_media(tweet_with("gif", "photo", "photo")) == ("gif", "photo", "photo")
+    assert lf.split_media(tweet_with("gif", "gif", "gif")) == ("gif", "gif", "gif")  # so each one plays
+    assert lf.split_media(tweet_with("video", "video")) == ("video", "video")
+    assert lf.split_media(tweet_with("photo", "photo")) == ()  # an image gallery works as it is
+    assert lf.split_media(tweet_with("video")) == ()
+    assert lf.split_media(None) == () and lf.split_media({}) == ()
+
+
+async def test_gif_only_tweet_gets_one_preview_per_gif(h, db):
+    h.tweet_info = {"lang": "en", "text": "gifs", "media": {"all": [{"type": "gif"}] * 3}}
+    h.embed_script = [[text_embed().to_dict()]]
+    await h.cog.process(message("https://x.com/a/status/1"))
+    (content, _), = h.sent
+    assert "(https://fxtwitter.com/twitter:1/video/1)" in content
+    assert "(https://d.fxtwitter.com/twitter:1/video/2)" in content
+    assert "(https://d.fxtwitter.com/twitter:1/video/3)" in content
+    (row,) = await db.get_reposts_for_origin(500)
+    assert row.media == "gif,gif,gif"
 
 
 MIXED = {"lang": "en", "text": "art and animation", "media": {"all": [{"type": "photo"}, {"type": "video"}]}}

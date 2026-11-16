@@ -465,7 +465,7 @@ def fixed_url(m: LinkMatch, fixer: Fixer, lang: str | None = None) -> str:
 def media_links(
     m: LinkMatch, fixer: Fixer, media: Sequence[str] = (), lang: str | None = None
 ) -> list[tuple[str, str]]:
-    """(kind, fixer URL) for each link a repost needs. Normally one. A tweet mixing photos and videos gets
+    """(kind, fixer URL) for each link a repost needs. Normally one. A tweet with a video and other items gets
     one per item: Discord folds same-URL previews into one image gallery, where a video can't play, so
     each item gets its own URL ("/photo/1", "/video/2"; every fixer picks the item by position). The
     first is the full card with the tweet's text; the rest are the bare media (the fixer's direct

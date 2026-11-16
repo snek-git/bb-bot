@@ -7,6 +7,7 @@ What she does:
 - Fixes links automatically, one repost per link, with backup fixers when a preview doesn't show up
 - Downloads and uploads the media herself when every fixer fails
 - Instagram links get her own card (from OGInstagram's data): the caption without its hashtag pile, then the media
+- Tweets with more than 4 pictures get her own card with every picture. A row of tall pictures (CD spines, a picture cut into strips) is joined side by side into one picture, as X shows it. Tweets with several GIFs or videos get one preview per item, so each one plays
 - Hides the original's preview (or deletes the original, or leaves it alone; per server)
 - Deletes or updates her reposts when the original is deleted or edited
 - Reposts show just the preview, a small "Tweet" (or "Pixiv", ...) link to the original, and Find source / Translate buttons

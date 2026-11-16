@@ -24,7 +24,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from bb import ehentai, instagram, nhentai, render, rerun, strings, upload, views
+from bb import ehentai, instagram, nhentai, render, rerun, strings, tweetcard, upload, views
 from bb.cards import Cover
 from bb.db import PostRow, RepostRow
 from bb.fixlog import trail
@@ -178,14 +178,16 @@ FIND_SOURCE_SITES = frozenset({"reddit", "bluesky", "instagram"})
 NO_TEXT_LANGS = frozenset({"zxx", "und", "qme", "qam", "qct", "qht", "qst"})
 
 
-def mixed_media(tweet: dict[str, Any] | None) -> tuple[str, ...]:
-    """The tweet's media kinds when it mixes photos with videos or GIFs, else (). Those need one preview
-    per item: Discord folds same-URL previews into an image gallery, where the video can't play."""
+def split_media(tweet: dict[str, Any] | None) -> tuple[str, ...]:
+    """The tweet's media kinds when it has a video or GIF next to anything else, else (). Those need one
+    preview per item: a fixer's single preview plays only its first video, and Discord folds same-URL
+    previews into an image gallery, where a video can't play."""
     if not tweet:
         return ()
     items = (tweet.get("media") or {}).get("all") or []
     kinds = tuple(str(item.get("type")) for item in items if isinstance(item, dict))
-    if "photo" in kinds and any(kind in ("video", "gif") for kind in kinds):
+    moving = sum(kind in ("video", "gif") for kind in kinds)
+    if moving and len(kinds) > 1:
         return kinds[:4]
     return ()
 
@@ -314,8 +316,8 @@ class LiveRepost:
     origin: Any = None
     settings: GuildSettings | None = None
     view: Any = None
-    media: tuple[str, ...] = ()  # a mixed tweet's media kinds: one preview per item
-    card: bool = False  # BB's own card (Instagram): nothing to wait for, it's settled when sent
+    media: tuple[str, ...] = ()  # a split tweet's media kinds: one preview per item
+    card: bool = False  # BB's own card (Instagram, many-picture tweets): settled when sent
 
 
 # Attachments are rebuilt for every send attempt: discord.py closes a File once a send ends, even a
@@ -882,14 +884,21 @@ class LinkFix(commands.Cog):
             post = await instagram.fetch_post(self.bot.http_client, m)
             card = None
             if post is not None:
-                card = await self._send_instagram_card(message, settings, m, post, quip, is_rerun=is_rerun)
+                buttons = views.repost_buttons(origin_author_id=message.author.id, has_image=post.has_image)
+                view = instagram.build_card(post, m, buttons=buttons, quip=quip)
+                card = await self._send_own_card(
+                    message, settings, m, view, None, quip, is_rerun=is_rerun, count=len(post.media)
+                )
             if card is not None or message.id in self._deleted_origins:
                 return card
             trail(message, "no Instagram card for %s, using the fixer link", m.canonical_key)
         tweet = await self._tweet_info(m) if m.site.id == "twitter" else None
+        card = await self._send_tweet_card(message, settings, m, tweet, quip, is_rerun=is_rerun)
+        if card is not None or message.id in self._deleted_origins:
+            return card
         fixers = list(sites.chain(m.site.id, self.bot.down_fixers))
         first = fixers[0] if fixers else None
-        media = mixed_media(tweet)
+        media = split_media(tweet)
         if first is not None:
             content = render.repost_text(m, first, quip, media=media)
         else:
@@ -935,27 +944,56 @@ class LinkFix(commands.Cog):
             return None
         return repost
 
-    async def _send_instagram_card(
+    async def _send_tweet_card(
         self,
         message: discord.Message,
         settings: GuildSettings,
         m: LinkMatch,
-        post: instagram.Post,
+        tweet: dict[str, Any] | None,
         quip: str | None,
         *,
         is_rerun: bool,
     ) -> LiveRepost | None:
+        """BB's own card for a tweet with more pictures than a preview shows, or a strip row to join. None
+        when the tweet doesn't need one or it couldn't be sent: the fixer link takes over."""
         guild = message.guild
         assert guild is not None
-        buttons = views.repost_buttons(origin_author_id=message.author.id, has_image=post.has_image)
-        view = instagram.build_card(post, m, buttons=buttons, quip=quip)
+        post = tweetcard.parse(tweet)
+        if post is None or not tweetcard.wants_card(post):
+            return None
+        cover = await tweetcard.strip_cover(self.bot.http_client, post, guild.filesize_limit)
+        if cover is None and len(post.media) <= tweetcard.PREVIEW_LIMIT:
+            trail(message, "couldn't join the strip row of %s, using the fixer link", m.canonical_key)
+            return None
+        buttons = views.repost_buttons(origin_author_id=message.author.id, has_image=False)
+        view = tweetcard.build_card(post, m, buttons=buttons, quip=quip, cover=cover)
+        return await self._send_own_card(
+            message, settings, m, view, cover, quip, is_rerun=is_rerun, count=len(post.media)
+        )
+
+    async def _send_own_card(
+        self,
+        message: discord.Message,
+        settings: GuildSettings,
+        m: LinkMatch,
+        view: discord.ui.LayoutView,
+        cover: Cover | None,
+        quip: str | None,
+        *,
+        is_rerun: bool,
+        count: int,
+    ) -> LiveRepost | None:
+        """Send BB's own card for a link (Instagram, a tweet with many pictures) and record it as settled."""
+        guild = message.guild
+        assert guild is not None
         try:
-            sent = await self._send_card(message, settings, view, None, quip=quip)
+            sent = await self._send_card(message, settings, view, cover, quip=quip)
         except discord.HTTPException as exc:
-            trail(message, "could not send the Instagram card for %s: %s", m.canonical_key, exc,
+            trail(message, "could not send the %s card for %s: %s", m.site.name, m.canonical_key, exc,
                   level=logging.WARNING)
             return None
-        trail(message, "sent Instagram card %s for %s (%d media)", sent.id, m.canonical_key, len(post.media))
+        trail(message, "sent %s card %s for %s (%d media%s)", m.site.name, sent.id, m.canonical_key, count,
+              ", joined into one picture" if cover else "")
         row = RepostRow(
             repost_id=sent.id,
             guild_id=guild.id,
