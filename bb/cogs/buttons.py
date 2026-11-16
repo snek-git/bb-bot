@@ -1,4 +1,5 @@
-"""Repost buttons (Delete, Translate, Find source) and the "Remove BB's repost" right-click menu.
+"""Repost buttons (Delete, Translate, Find source, tweet card pages) and the "Remove BB's repost" right-click
+menu.
 
 The DynamicItems live in bb.views; this cog registers them and does the work.
 """
@@ -12,7 +13,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from bb import render, strings, views
+from bb import render, strings, tweetcard, views
 from bb.db import RepostRow
 from bb.fixlog import trail
 from bb.links import sites
@@ -224,6 +225,33 @@ class Buttons(commands.Cog):
         if fixer.id != row.fixer_id:
             changes["fixer_id"] = fixer.id
         await self.bot.db.update_repost(message.id, **changes)
+
+    # --- tweet card pages ---------------------------------------------------------------
+
+    async def on_page(self, interaction: discord.Interaction, page: int) -> None:
+        """Flip a tweet card to another page of pictures, for everyone. The card is rebuilt from FxTwitter's
+        API, so nothing about it has to be stored."""
+        message = interaction.message
+        if message is None:
+            return
+        row = await self.bot.db.get_repost(message.id)
+        match = sites.match(row.original_url, spoiler=row.spoiler) if row is not None else None
+        if row is None or match is None:
+            await interaction.response.send_message(strings.line("error.generic"), ephemeral=True)
+            return
+        await interaction.response.defer()  # the API answer can take longer than Discord waits
+        tweet = tweetcard.parse(await tweetcard.fetch(self.bot.http_client, match))
+        if tweet is None:
+            log.warning("page %s of repost %s: no answer from FxTwitter", page, message.id)
+            await interaction.followup.send(strings.line("error.generic"), ephemeral=True)
+            return
+        buttons = views.repost_buttons(origin_author_id=row.origin_author_id, has_image=False)
+        view = tweetcard.build_card(tweet, match, buttons=buttons, quip=row.quip, page=page)
+        try:
+            await interaction.edit_original_response(view=view)
+        except discord.HTTPException:
+            log.exception("flipping repost %s to page %s failed", message.id, page)
+            await interaction.followup.send(strings.line("error.generic"), ephemeral=True)
 
     # --- find source --------------------------------------------------------------------
 

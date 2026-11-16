@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import discord
 import pytest
 
-from bb import strings, views
+from bb import strings, tweetcard, views
 from bb.cogs import buttons, chat
 from bb.db import RepostRow
 from bb.links import extract, resolve, sites
@@ -144,10 +144,10 @@ def test_custom_id_roundtrip():
 def test_templates_fullmatch_only_their_ids():
     # discord.py dispatches with pattern.fullmatch, so ids must not bleed into each other.
     templates = [cls.__discord_ui_compiled_template__ for cls in views.DYNAMIC_ITEMS]
-    for custom_id, expected in [("bb:del:7", 0), ("bb:tr:0", 1), ("bb:src", 2)]:
+    for custom_id, expected in [("bb:del:7", 0), ("bb:tr:0", 1), ("bb:src", 2), ("bb:pg:n:1", 3)]:
         hits = [i for i, t in enumerate(templates) if t.fullmatch(custom_id)]
         assert hits == [expected]
-    assert not any(t.fullmatch("bb:srcx") for t in templates)
+    assert not any(t.fullmatch(custom_id) for t in templates for custom_id in ("bb:srcx", views.PAGE_AT_ID))
 
 
 async def test_view_for_tweet_with_image():
@@ -173,6 +173,19 @@ async def test_dynamic_items_rebuild_from_custom_id():
         None, None, re.fullmatch(views.TRANSLATE_TEMPLATE, "bb:tr:1")
     )
     assert item.translated is True
+    item = await views.PageButton.from_custom_id(None, None, re.fullmatch(views.PAGE_TEMPLATE, "bb:pg:n:2"))
+    assert item.page == 2 and item.custom_id == "bb:pg:n:2" and item.item.label == "▶"
+
+
+def test_page_buttons_grey_out_the_way_that_leads_nowhere():
+    def state(page, pages):
+        return [(item.custom_id, item.label if isinstance(item, discord.ui.Button) else item.item.label,
+                 item.disabled if isinstance(item, discord.ui.Button) else item.item.disabled)
+                for item in views.page_buttons(page, pages)]
+
+    assert state(0, 2) == [("bb:pg:p:0", "◀", True), ("bb:pg:at", "1/2", True), ("bb:pg:n:1", "▶", False)]
+    assert state(1, 3) == [("bb:pg:p:0", "◀", False), ("bb:pg:at", "2/3", True), ("bb:pg:n:2", "▶", False)]
+    assert state(2, 3) == [("bb:pg:p:1", "◀", False), ("bb:pg:at", "3/3", True), ("bb:pg:n:2", "▶", True)]
 
 
 def test_has_find_source_walks_action_rows():
@@ -425,6 +438,54 @@ async def test_translate_webhook_repost_in_thread(db, fake_sites, monkeypatch):
     assert _ids(kwargs["view"])[:1] == ["bb:tr:0"]
     row = await db.get_repost(500)
     assert row.translated is False and row.quip is None
+
+
+def _card_pictures(view) -> list[str]:
+    (container,) = [child for child in view.children if isinstance(child, discord.ui.Container)]
+    (gallery,) = [child for child in container.children if isinstance(child, discord.ui.MediaGallery)]
+    return [item.media.url for item in gallery.items]
+
+
+async def test_page_flips_the_tweet_card_for_everyone(db, fake_sites, monkeypatch):
+    await db.insert_repost(make_row(fixer_id=None, quip="a quip"))
+    tweet = {
+        "url": "https://x.com/bb/status/1", "id": "1", "text": "pics", "author": {"screen_name": "bb"},
+        "media": {"all": [{"type": "photo", "url": f"https://pbs.twimg.com/media/{n}.jpg", "width": 900,
+                           "height": 600} for n in range(17)]},
+    }
+    asked = []
+
+    async def fetch(session, m):
+        asked.append(m.url)
+        return tweet
+
+    monkeypatch.setattr(tweetcard, "fetch", fetch)
+    bot = make_bot(db)
+    bot.http_client = None
+    interaction = make_interaction(message=make_message())
+    interaction.edit_original_response = AsyncMock()
+    await buttons.Buttons(bot).on_page(interaction, 1)
+    assert interaction.response.names == ["defer"] and asked == ["https://x.com/bb/status/1"]
+    view = interaction.edit_original_response.await_args.kwargs["view"]
+    assert _card_pictures(view) == [f"https://pbs.twimg.com/media/{n}.jpg" for n in range(9, 17)]
+    assert view.children[0].content == "-# a quip"  # the card keeps its line
+    assert views.PAGE_AT_ID in views.component_custom_ids(view.children)
+
+
+async def test_page_without_an_api_answer_is_an_ephemeral_error(db, fake_sites, monkeypatch):
+    await db.insert_repost(make_row(fixer_id=None))
+
+    async def fetch(session, m):
+        return None
+
+    monkeypatch.setattr(tweetcard, "fetch", fetch)
+    bot = make_bot(db)
+    bot.http_client = None
+    interaction = make_interaction(message=make_message())
+    interaction.edit_original_response = AsyncMock()
+    await buttons.Buttons(bot).on_page(interaction, 1)
+    interaction.edit_original_response.assert_not_awaited()
+    assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
 
 
 async def test_translate_without_row_is_an_ephemeral_error(db, fake_sites):

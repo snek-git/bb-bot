@@ -5,7 +5,7 @@ import io
 import discord
 from PIL import Image
 
-from bb import tweetcard
+from bb import tweetcard, views
 from bb.links.model import LinkMatch
 from bb.links.sites import SITES
 
@@ -108,12 +108,35 @@ def _galleries(view: discord.ui.LayoutView) -> list[list[str]]:
     ]
 
 
-def test_card_shows_every_picture_ten_to_a_gallery():
+def test_pages_of_splits_evenly():
+    def sizes(n):
+        return [len(page) for page in tweetcard.pages_of([str(i) for i in range(n)])]
+
+    assert sizes(3) == [3] and sizes(10) == [10]
+    assert sizes(11) == [6, 5] and sizes(17) == [9, 8] and sizes(20) == [10, 10]
+    assert sizes(21) == [7, 7, 7]
+
+
+def _page_ids(view: discord.ui.LayoutView) -> list[str]:
+    return [cid for cid in views.component_custom_ids(view.children) if cid.startswith("bb:pg:")]
+
+
+def test_card_shows_one_page_with_page_buttons():
     tweet = tweetcard.parse(SPINES)
     assert tweet is not None
+    first = tweetcard.build_card(tweet, MATCH, buttons=[])
+    assert _galleries(first) == [[f"https://pbs.twimg.com/media/S{n}.jpg?name=orig" for n in range(9)]]
+    assert _page_ids(first) == ["bb:pg:p:0", "bb:pg:at", "bb:pg:n:1"]
+    second = tweetcard.build_card(tweet, MATCH, buttons=[], page=1)
+    assert _galleries(second) == [[f"https://pbs.twimg.com/media/S{n}.jpg?name=orig" for n in range(9, 17)]]
+    assert _galleries(tweetcard.build_card(tweet, MATCH, buttons=[], page=7)) == _galleries(second)  # clamped
+
+
+def test_card_with_ten_or_fewer_has_no_page_buttons():
+    tweet = tweetcard.parse({**SPINES, "media": {"all": SPINES["media"]["all"][:10]}})
+    assert tweet is not None
     view = tweetcard.build_card(tweet, MATCH, buttons=[])
-    galleries = _galleries(view)
-    assert [len(g) for g in galleries] == [10, 7] and galleries[0][0] == "https://pbs.twimg.com/media/S0.jpg?name=orig"
+    assert [len(g) for g in _galleries(view)] == [10] and _page_ids(view) == []
 
 
 def test_card_with_a_joined_row_shows_only_that():

@@ -1066,16 +1066,7 @@ class LinkFix(commands.Cog):
     async def _tweet_info(self, m: LinkMatch) -> dict[str, Any] | None:
         """The tweet as FxTwitter's API describes it (for its language), fetched before sending so nothing
         needs an edit later. None if it doesn't answer in time."""
-        if "id" not in m.parts:
-            return None
-        url = f"https://api.fxtwitter.com/{m.parts.get('user') or 'i'}/status/{m.parts['id']}"
-        try:
-            async with self.bot.http_client.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
-                if resp.status != 200:
-                    return None
-                return (await resp.json(content_type=None)).get("tweet") or None
-        except (aiohttp.ClientError, TimeoutError, ValueError):
-            return None
+        return await tweetcard.fetch(self.bot.http_client, m)
 
     async def _predict_image(self, m: LinkMatch) -> bool:
         """Whether this repost gets a Find source button. Decided before sending, so the button never has to

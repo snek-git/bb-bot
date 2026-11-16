@@ -1,5 +1,6 @@
 """BB's own card for tweets a fixer link can't show whole. A fixer's preview holds at most 4 pictures, so
-a tweet with more gets BB's card: the author and text, then every item in media galleries. A row of tall
+a tweet with more gets BB's card: the author and text, then the pictures, a page of up to 10 at a time
+with ◀ ▶ buttons (the buttons cog rebuilds the card from the API for the page clicked). A row of tall
 pictures (CD spines, a picture cut into strips) is meant to be seen side by side, as X shows it, so BB
 joins those into one picture first. The data is FxTwitter's API answer the repost already fetches.
 """
@@ -9,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,7 +18,7 @@ import aiohttp
 import discord
 from PIL import Image
 
-from bb import cards
+from bb import cards, views
 from bb.cards import Cover
 from bb.links.model import LinkMatch
 from bb.render import BB_PURPLE
@@ -38,6 +40,7 @@ STRIP_GAP = 1 / 200  # of the row's height
 STRIP_FILENAME = "row.webp"
 MEDIA_HOST = "https://pbs.twimg.com/"
 FETCH_TIMEOUT = aiohttp.ClientTimeout(total=15)
+API_TIMEOUT = aiohttp.ClientTimeout(total=3)
 
 
 @dataclass(frozen=True)
@@ -162,6 +165,30 @@ async def strip_cover(session: aiohttp.ClientSession, tweet: Tweet, max_bytes: i
     return Cover(data, STRIP_FILENAME)
 
 
+def pages_of(urls: list[str]) -> list[list[str]]:
+    """The pictures split into as few pages as a gallery's limit allows, as even as possible (11 is 6 and
+    5, never 10 and a lonely 1)."""
+    count = max(1, math.ceil(len(urls) / GALLERY_SIZE))
+    size = math.ceil(len(urls) / count)
+    return [urls[start : start + size] for start in range(0, len(urls), size)] or [[]]
+
+
+async def fetch(session: aiohttp.ClientSession, m: LinkMatch) -> dict[str, Any] | None:
+    """The tweet as FxTwitter's API describes it. None if it doesn't answer in time."""
+    if "id" not in m.parts:
+        return None
+    url = f"https://api.fxtwitter.com/{m.parts.get('user') or 'i'}/status/{m.parts['id']}"
+    try:
+        async with session.get(url, timeout=API_TIMEOUT) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json(content_type=None)
+    except (aiohttp.ClientError, TimeoutError, ValueError):
+        return None
+    tweet = data.get("tweet") if isinstance(data, dict) else None
+    return tweet if isinstance(tweet, dict) else None
+
+
 def card_text(tweet: Tweet) -> str:
     who = f"{tweet.name} (@{tweet.user})" if tweet.name else f"@{tweet.user}"
     lines = [f"**[{cards.link_text(who)}]({tweet.profile})**"]
@@ -179,19 +206,22 @@ def build_card(
     buttons: list[discord.ui.Item[Any]],
     quip: str | None = None,
     cover: Cover | None = None,
+    page: int = 0,
 ) -> discord.ui.LayoutView:
-    """Components V2 card: the author and text, the media (the joined strip row when there's a cover, else
-    every item, 10 to a gallery), then the link and BB's buttons."""
+    """Components V2 card: the author and text, the media, then the link and BB's buttons. The media is the
+    joined strip row when there's a cover, else one page of the pictures with ◀ 1/2 ▶ under it when
+    there's more than one page."""
     view = discord.ui.LayoutView(timeout=None)
     if quip:
         view.add_item(discord.ui.TextDisplay(f"-# {quip}"))
     container = discord.ui.Container(accent_colour=BB_PURPLE)
     container.add_item(discord.ui.TextDisplay(card_text(tweet)))
-    urls = [f"attachment://{cover.filename}"] if cover else [item.url for item in tweet.media]
-    for start in range(0, len(urls), GALLERY_SIZE):
-        chunk = urls[start : start + GALLERY_SIZE]
-        items = [discord.MediaGalleryItem(url, spoiler=m.spoiler) for url in chunk]
-        container.add_item(discord.ui.MediaGallery(*items))
+    pages = [[f"attachment://{cover.filename}"]] if cover else pages_of([item.url for item in tweet.media])
+    page = min(max(page, 0), len(pages) - 1)
+    items = [discord.MediaGalleryItem(url, spoiler=m.spoiler) for url in pages[page]]
+    container.add_item(discord.ui.MediaGallery(*items))
+    if len(pages) > 1:
+        container.add_item(discord.ui.ActionRow(*views.page_buttons(page, len(pages))))
     link = discord.ui.Button(label="Open on X", url=tweet.url)
     container.add_item(discord.ui.ActionRow(link, *buttons))
     view.add_item(container)

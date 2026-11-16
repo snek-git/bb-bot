@@ -23,6 +23,9 @@ BUTTONS_COG = "Buttons"
 DELETE_TEMPLATE = r"bb:del:(?P<author_id>[0-9]{1,20})"
 TRANSLATE_TEMPLATE = r"bb:tr:(?P<state>[01])"
 FIND_SOURCE_ID = "bb:src"
+# Page buttons on a tweet card: p (back) or n (next), and the page the click goes to (0-based).
+PAGE_TEMPLATE = r"bb:pg:(?P<way>[pn]):(?P<page>[0-9]{1,2})"
+PAGE_AT_ID = "bb:pg:at"  # the "1/2" between them: disabled, never clicked
 
 
 def delete_id(origin_author_id: int) -> str:
@@ -126,7 +129,43 @@ class FindSourceButton(discord.ui.DynamicItem[discord.ui.Button], template=re.es
         await _dispatch(interaction, "on_find_source")
 
 
-DYNAMIC_ITEMS = (DeleteButton, TranslateButton, FindSourceButton)
+class PageButton(discord.ui.DynamicItem[discord.ui.Button], template=PAGE_TEMPLATE):
+    """◀ or ▶ on a tweet card. The page it goes to is in the custom_id; the card is rebuilt on click."""
+
+    def __init__(self, way: str, page: int, *, disabled: bool = False) -> None:
+        self.page = page
+        super().__init__(
+            discord.ui.Button(
+                label="◀" if way == "p" else "▶",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"bb:pg:{way}:{page}",
+                disabled=disabled,
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(
+        cls, interaction: discord.Interaction, item: discord.ui.Button, match: re.Match[str], /
+    ) -> PageButton:
+        return cls(match["way"], int(match["page"]))
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await _dispatch(interaction, "on_page", self.page)
+
+
+def page_buttons(page: int, pages: int) -> list[discord.ui.Item[Any]]:
+    """◀ 1/2 ▶ for a card showing page (0-based) of pages. The way that leads nowhere is greyed out."""
+    at = discord.ui.Button(
+        label=f"{page + 1}/{pages}", style=discord.ButtonStyle.secondary, custom_id=PAGE_AT_ID, disabled=True
+    )
+    return [
+        PageButton("p", max(page - 1, 0), disabled=page == 0),
+        at,
+        PageButton("n", min(page + 1, pages - 1), disabled=page >= pages - 1),
+    ]
+
+
+DYNAMIC_ITEMS = (DeleteButton, TranslateButton, FindSourceButton, PageButton)
 
 
 SHOW_DELETE = False  # Delete is parked until we decide who may use it; its handler still works.

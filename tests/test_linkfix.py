@@ -471,7 +471,7 @@ async def test_tweet_with_more_than_four_pictures_gets_bbs_card(h, db, xcard):
     await h.cog.process(message("https://x.com/a/status/1"))
     ((view, cover),) = xcard.cards
     assert h.sent == [] and h.waits == [] and cover is None
-    assert [len(urls) for urls in gallery_urls(view)] == [10, 2]  # every picture, 10 to a gallery
+    assert [len(urls) for urls in gallery_urls(view)] == [6]  # page 1 of 2: 12 is 6 and 6
     (row,) = await db.get_reposts_for_origin(500)
     assert (row.status, row.fixer_id, row.site) == ("ok", None, "twitter")
     assert h.original == [(500, "suppress")]
