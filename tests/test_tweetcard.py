@@ -133,9 +133,14 @@ def test_pages_of_splits_evenly():
     def sizes(n):
         return [len(page) for page in tweetcard.pages_of([str(i) for i in range(n)])]
 
-    assert sizes(3) == [3] and sizes(10) == [10]
-    assert sizes(11) == [6, 5] and sizes(17) == [9, 8] and sizes(20) == [10, 10]
-    assert sizes(21) == [7, 7, 7]
+    assert sizes(3) == [3] and sizes(9) == [9]
+    # Never 10 or 7 on a page: Discord shows those with the first picture cropped into a wide banner.
+    assert sizes(10) == [5, 5] and sizes(7) == [4, 3]
+    assert sizes(11) == [6, 5] and sizes(13) == [8, 5] and sizes(17) == [9, 8]
+    assert sizes(20) == [8, 6, 6]  # a real tweet (2026-11): 9 GIFs and 11 pictures
+    for total in range(1, 41):
+        found = tweetcard.page_sizes(total)
+        assert sum(found) == total and not {7, 10} & set(found) and max(found) <= 9
 
 
 def _page_ids(view: discord.ui.LayoutView) -> list[str]:
@@ -153,11 +158,11 @@ def test_card_shows_one_page_with_page_buttons():
     assert _galleries(tweetcard.build_card(tweet, MATCH, buttons=[], page=7)) == _galleries(second)  # clamped
 
 
-def test_card_with_ten_or_fewer_has_no_page_buttons():
-    tweet = tweetcard.parse({**SPINES, "media": {"all": SPINES["media"]["all"][:10]}})
+def test_card_with_nine_or_fewer_has_no_page_buttons():
+    tweet = tweetcard.parse({**SPINES, "media": {"all": SPINES["media"]["all"][:9]}})
     assert tweet is not None
     view = tweetcard.build_card(tweet, MATCH, buttons=[])
-    assert [len(g) for g in _galleries(view)] == [10] and _page_ids(view) == []
+    assert [len(g) for g in _galleries(view)] == [9] and _page_ids(view) == []
 
 
 def test_card_with_a_joined_row_shows_only_that():

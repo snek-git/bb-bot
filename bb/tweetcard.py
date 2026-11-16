@@ -1,5 +1,5 @@
 """BB's own card for tweets a fixer link can't show whole. A fixer's preview holds at most 4 pictures, so
-a tweet with more gets BB's card: the author and text, then the pictures, a page of up to 10 at a time
+a tweet with more gets BB's card: the author and text, then the pictures, a page of up to 9 at a time
 with ◀ ▶ buttons (the buttons cog rebuilds the card from the API for the page clicked). A row of tall
 pictures (CD spines, a picture cut into strips) is meant to be seen side by side, as X shows it, so BB
 joins those into one picture first. The data is FxTwitter's API answer the repost already fetches.
@@ -12,6 +12,7 @@ import io
 import logging
 import math
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote as quote_path
@@ -28,7 +29,10 @@ from bb.render import BB_PURPLE
 log = logging.getLogger(__name__)
 
 PREVIEW_LIMIT = 4  # pictures a fixer's preview shows
-GALLERY_SIZE = 10  # items in one Discord media gallery
+# Pictures on one page of a card. A Discord gallery holds 10, but shows 10 (and 7) as one wide banner on
+# top of a grid, and the banner crops a tall picture to a strip of its middle. So pages hold 9 at most
+# and never 7.
+PAGE_SIZES = (9, 8, 6, 5, 4, 3, 2, 1)
 MAX_MEDIA = 40
 TEXT_LIMIT = 1000
 QUOTE_LIMIT = 500
@@ -223,12 +227,35 @@ async def strip_cover(session: aiohttp.ClientSession, tweet: Tweet, max_bytes: i
     return Cover(data, STRIP_FILENAME)
 
 
+def _splits(total: int, count: int, top: int) -> Iterator[tuple[int, ...]]:
+    """Every way to write total as count page sizes from PAGE_SIZES, largest first, none over top."""
+    if count == 0:
+        if total == 0:
+            yield ()
+        return
+    for size in PAGE_SIZES:
+        if size <= top and size <= total:
+            for rest in _splits(total - size, count - 1, size):
+                yield (size, *rest)
+
+
+def page_sizes(total: int) -> tuple[int, ...]:
+    """As few pages as fit, as even as possible, and never a page Discord shows with a cropped banner."""
+    for count in range(max(1, math.ceil(total / PAGE_SIZES[0])), total + 1):
+        splits = _splits(total, count, PAGE_SIZES[0])
+        found = min(splits, key=lambda sizes: sizes[0] - sizes[-1], default=None)
+        if found:
+            return found
+    return (total,)
+
+
 def pages_of(urls: list[str]) -> list[list[str]]:
-    """The pictures split into as few pages as a gallery's limit allows, as even as possible (11 is 6 and
-    5, never 10 and a lonely 1)."""
-    count = max(1, math.ceil(len(urls) / GALLERY_SIZE))
-    size = math.ceil(len(urls) / count)
-    return [urls[start : start + size] for start in range(0, len(urls), size)] or [[]]
+    """The pictures split by page_sizes: 11 is 6 and 5, never 10 and a lonely 1, and 7 is 4 and 3."""
+    pages, start = [], 0
+    for size in page_sizes(len(urls)):
+        pages.append(urls[start : start + size])
+        start += size
+    return pages or [[]]
 
 
 async def fetch(
