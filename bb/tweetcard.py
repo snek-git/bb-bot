@@ -11,6 +11,7 @@ import asyncio
 import io
 import logging
 import math
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote as quote_path
@@ -89,6 +90,17 @@ def _stats(tweet: dict[str, Any]) -> str:
     return "  ".join(f"{icon} {count:,}" for icon, count in parts if count)
 
 
+_GIF_MP4 = re.compile(r"https://video\.twimg\.com/tweet_video/([\w-]+)\.mp4")
+
+
+def gif_image(url: str) -> str:
+    """An X GIF is really an .mp4, which a Discord gallery shows as a video with a play button. FxTwitter
+    serves each one as an animated .webp image (the same file its own previews use), which loops on its
+    own like a GIF. Any other URL comes back unchanged."""
+    found = _GIF_MP4.fullmatch(url)
+    return f"https://gif.fxtwitter.com/tweet_video/{found[1]}.webp" if found else url
+
+
 def _translation(tweet: dict[str, Any]) -> dict[str, Any] | None:
     """FxTwitter's translation of a post fetched with a language, when it has text."""
     found = tweet.get("translation")
@@ -127,8 +139,11 @@ def parse(tweet: dict[str, Any] | None, *, translated: bool = False) -> Tweet | 
             continue
         url = item.get("url")
         if isinstance(url, str) and url.startswith("https://"):
-            video = item.get("type") in ("video", "gif")
-            media.append(Media(url, video, _int(item.get("width")), _int(item.get("height"))))
+            kind = item.get("type")
+            if kind == "gif":
+                url = gif_image(url)
+            size = _int(item.get("width")), _int(item.get("height"))
+            media.append(Media(url, kind in ("video", "gif"), *size))
     if not user or not media:
         return None
     url = str(tweet.get("url") or "")

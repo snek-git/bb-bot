@@ -49,6 +49,27 @@ def test_parse_real_tweet():
     assert len(tweet.media) == 17 and tweetcard.wants_card(tweet)
 
 
+def test_gifs_become_fxtwitters_animated_images():
+    # A real tweet (2026-11) with 9 GIFs and 11 pictures, trimmed to one of each.
+    tweet = tweetcard.parse({
+        **SPINES,
+        "media": {"all": [
+            {"type": "gif", "url": "https://video.twimg.com/tweet_video/HXNbE-kaYAEP6_o.mp4", "width": 720,
+             "height": 1280},
+            {"type": "video", "url": "https://video.twimg.com/amplify_video/1/vid/720x1280/a.mp4",
+             "width": 720, "height": 1280},
+            {"type": "photo", "url": "https://pbs.twimg.com/media/HXNbE_BbAAA02bK.jpg?name=orig",
+             "width": 1388, "height": 2048},
+        ]},
+    })
+    assert tweet is not None
+    assert [(item.url, item.video) for item in tweet.media] == [
+        ("https://gif.fxtwitter.com/tweet_video/HXNbE-kaYAEP6_o.webp", True),  # loops on its own
+        ("https://video.twimg.com/amplify_video/1/vid/720x1280/a.mp4", True),  # a real video keeps its player
+        ("https://pbs.twimg.com/media/HXNbE_BbAAA02bK.jpg?name=orig", False),
+    ]
+
+
 def test_parse_needs_author_and_media():
     assert tweetcard.parse(None) is None
     assert tweetcard.parse({**SPINES, "media": {"all": []}}) is None
