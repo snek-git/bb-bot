@@ -4,7 +4,8 @@ Two styles, chosen once at startup with LINK_STYLE in .env:
 
 - "hidden" (default): one small line, "Tweet · FxTwitter", then the quip if there is one. "Tweet" links to
   the real post (no preview); the fixer's name is the link Discord previews, and the one people can copy
-  to post elsewhere.
+  to post elsewhere. A fixer with a shown_domain (BBTwitter) splits those two: its name links to the shown
+  domain without a preview, and the previewed link hides behind the "·" in front of it.
 - "subtle": one small grey line, "@user on Twitter", linking to the fixer.
 
 """
@@ -67,17 +68,25 @@ def format_repost(
     style: Style | None = None,
     *,
     more: Sequence[tuple[str, str]] = (),
+    shown: str | None = None,
 ) -> str:
     """The repost text: a link to the fixer URL (previewed) plus the quip, if any. more: extra
-    (label, URL) previews for a tweet with a video and other items, one per item."""
+    (label, URL) previews for a tweet with a video and other items, one per item.
+
+    shown: the URL the visible link goes to instead (BBTwitter's shows fxtwitter.com). That link gets no
+    preview, and the fixer URL, which Discord previews, hides behind the "·" in front of it."""
     extra = [_spoiler(f"[{label}]({md_url(url)})", m.spoiler) for label, url in more]
-    fixed = md_url(fixed)
+    tail = [*extra, *([quip] if quip else [])]
+    target = f"<{md_url(shown)}>" if shown else md_url(fixed)
+    hidden = f" {_spoiler(f'[·]({md_url(fixed)})', m.spoiler)} " if shown else SEPARATOR
     if (style or _style) == "subtle":
-        link = _spoiler(f"[{_who(m)}]({fixed})", m.spoiler)
-        return "-# " + SEPARATOR.join([link, *extra, *([quip] if quip else [])])
+        link = _spoiler(f"[{_who(m)}]({target})", m.spoiler)
+        if shown:
+            return "-# " + SEPARATOR.join([link + hidden.rstrip(), *tail])
+        return "-# " + SEPARATOR.join([link, *tail])
     source = f"[{m.site.label}](<{md_url(sites.source_url(m))}>)"
-    link = _spoiler(f"[{fixer_name}]({fixed})", m.spoiler)
-    return "-# " + SEPARATOR.join([source, link, *extra, *([quip] if quip else [])])
+    link = _spoiler(f"[{fixer_name}]({target})", m.spoiler)
+    return "-# " + SEPARATOR.join([source + hidden + link, *tail])
 
 
 def repost_text(
@@ -91,7 +100,10 @@ def repost_text(
 ) -> str:
     """format_repost for a fixer, with one preview per item when the tweet has a video and other items."""
     (_, first), *rest = sites.media_links(m, fixer, media, lang)
-    return format_repost(m, fixer.name, first, quip, style, more=rest)
+    shown = None
+    if fixer.shown_domain:
+        shown = first.replace(f"https://{fixer.domain}", f"https://{fixer.shown_domain}", 1)
+    return format_repost(m, fixer.name, first, quip, style, more=rest, shown=shown)
 
 
 def format_upload(m: LinkMatch, quip: str | None = None, style: Style | None = None) -> str:

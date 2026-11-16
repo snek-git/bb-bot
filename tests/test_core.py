@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
 from bb import db as dbmod
-from bb import strings
+from bb import render, strings
 from bb.db import Database, HealthRow, RepostRow
+from bb.links import sites
 from bb.links.model import Fixer, LinkMatch, Site
 from bb.render import format_repost, format_upload
 from bb.settings_store import GuildSettings, RareLine, SettingsStore
@@ -297,6 +299,35 @@ def test_format_spoiler():
         f"-# [Tweet](<https://x.com/i/status/1>) · ||[FxTwitter]({_FIXED}) ||"
     )
     assert format_repost(m, "FxTwitter", _FIXED, style="subtle") == f"-# ||[Twitter post]({_FIXED}) ||"
+
+
+_BB = "https://bbtwitter.snek.page/bb/status/1"
+
+
+def test_bbtwitter_shows_fxtwitter_and_hides_its_own_link_for_the_preview():
+    m = LinkMatch(_SITE, "https://x.com/bb/status/1", "twitter:1", author="bb", author_url="https://x.com/bb")
+    src = "[Tweet](<https://x.com/bb/status/1>)"
+    # The visible label goes to fxtwitter.com, unpreviewed; Discord previews BBTwitter's link behind the "·".
+    assert format_repost(m, "BBTwitter", _BB, quip="hi", style="hidden", shown=_FIXED) == (
+        f"-# {src} [·]({_BB}) [BBTwitter](<{_FIXED}>) · hi"
+    )
+    assert format_repost(m, "BBTwitter", _BB, style="subtle", shown=_FIXED) == (
+        f"-# [@bb on Twitter](<{_FIXED}>) [·]({_BB})"
+    )
+    hidden_spoiler = replace(m, spoiler=True)
+    assert format_repost(hidden_spoiler, "BBTwitter", _BB, style="hidden", shown=_FIXED) == (
+        f"-# {src} ||[·]({_BB}) || ||[BBTwitter](<{_FIXED}>) ||"
+    )
+
+
+def test_repost_text_derives_bbtwitters_shown_link():
+    bb = Fixer("bbtwitter", "BBTwitter", "bbtwitter.snek.page", translatable=True,
+               shown_domain="fxtwitter.com")
+    m = sites.match("https://x.com/bb/status/1")
+    assert m is not None
+    assert render.repost_text(m, bb, lang="en", style="hidden").endswith(
+        "[·](https://bbtwitter.snek.page/bb/status/1/en) [BBTwitter](<https://fxtwitter.com/bb/status/1/en>)"
+    )
 
 
 def test_shuffle_bag_cycles_without_repeats():

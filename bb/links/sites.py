@@ -98,10 +98,11 @@ SITES: dict[str, Site] = {
         label="Tweet",
         fixers=(
             # BB's own address, passing FxTwitter's previews along under her name and icon (bb/bbtwitter.py).
-            # Its media-only links are FxTwitter's: they carry no name to change.
+            # Its media-only links are FxTwitter's: they carry no name to change. The link people see and copy
+            # is FxTwitter's too, so it doesn't depend on mc-server.
             Fixer(
                 "bbtwitter", "BBTwitter", "bbtwitter.snek.page", translatable=True,
-                direct_domain="d.fxtwitter.com",
+                direct_domain="d.fxtwitter.com", shown_domain="fxtwitter.com",
             ),
             Fixer(
                 "fxtwitter", "FxTwitter", "fxtwitter.com", translatable=True, direct_domain="d.fxtwitter.com"

@@ -16,6 +16,9 @@ class Fixer:
     # Serves a post's media alone, without the text card (e.g. "d.fxtwitter.com"). Used for the extra
     # items of a mixed photo+video tweet, so the tweet's text shows once.
     direct_domain: str | None = None
+    # The domain of the link people see, click and copy, when it isn't the one Discord previews. BBTwitter
+    # shows fxtwitter.com: the same post, and a copied link keeps working wherever BB's server is.
+    shown_domain: str | None = None
 
 
 @dataclass(frozen=True)
