@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 import discord
@@ -46,19 +46,33 @@ def parse_translate_id(custom_id: str) -> bool | None:
     return m["state"] == "1" if m else None
 
 
-def component_custom_ids(components: Iterable[Any]) -> list[str]:
-    """Every custom_id in a message's components, walking into action rows."""
-    found: list[str] = []
+def _walk(components: Iterable[Any]) -> Iterator[Any]:
+    """Every component, walking into action rows and containers."""
     for component in components:
-        custom_id = getattr(component, "custom_id", None)
-        if custom_id:
-            found.append(custom_id)
-        found.extend(component_custom_ids(getattr(component, "children", None) or ()))
-    return found
+        yield component
+        yield from _walk(getattr(component, "children", None) or ())
+
+
+def component_custom_ids(components: Iterable[Any]) -> list[str]:
+    """Every custom_id in a message's components, walking into action rows and containers."""
+    return [cid for cid in (getattr(c, "custom_id", None) for c in _walk(components)) if cid]
 
 
 def has_find_source(components: Iterable[Any]) -> bool:
     return FIND_SOURCE_ID in component_custom_ids(components)
+
+
+def has_translate(components: Iterable[Any]) -> bool:
+    return any(parse_translate_id(cid) is not None for cid in component_custom_ids(components))
+
+
+def current_page(components: Iterable[Any]) -> int:
+    """The page (0-based) a tweet card shows, from its "2/3" button. 0 when it has none."""
+    for component in _walk(components):
+        if getattr(component, "custom_id", None) == PAGE_AT_ID:
+            shown, _, _ = str(getattr(component, "label", "") or "").partition("/")
+            return int(shown) - 1 if shown.isdigit() and int(shown) > 0 else 0
+    return 0
 
 
 async def _dispatch(interaction: discord.Interaction, method: str, *args: Any) -> None:

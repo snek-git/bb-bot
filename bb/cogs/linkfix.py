@@ -965,7 +965,11 @@ class LinkFix(commands.Cog):
         if cover is None and len(post.media) <= tweetcard.PREVIEW_LIMIT:
             trail(message, "couldn't join the strip row of %s, using the fixer link", m.canonical_key)
             return None
-        buttons = views.repost_buttons(origin_author_id=message.author.id, has_image=False)
+        buttons = views.repost_buttons(
+            origin_author_id=message.author.id,
+            has_image=False,
+            translatable=translate_offered(tweet, settings.translate_lang),
+        )
         view = tweetcard.build_card(post, m, buttons=buttons, quip=quip, cover=cover)
         return await self._send_own_card(
             message, settings, m, view, cover, quip, is_rerun=is_rerun, count=len(post.media)

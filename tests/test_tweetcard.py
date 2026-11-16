@@ -147,6 +147,47 @@ def test_card_with_a_joined_row_shows_only_that():
     assert isinstance(view.children[0], discord.ui.TextDisplay) and view.children[0].content == "-# hi"
 
 
+# FxTwitter's answer for a real FGO post quoting another (2026-11), fetched with /en and trimmed.
+QUOTING = {
+    "url": "https://x.com/fgoproject/status/2122268632776642909",
+    "text": "【カルデア広報局より】\n★5(SSR)ダイナマイト利休を紹介！",
+    "translation": {"text": "Introducing ★5 (SSR) Dynamite Rikyu!", "source_lang": "ja", "target_lang": "en"},
+    "author": {"screen_name": "fgoproject", "name": "【公式】Fate/Grand Order"},
+    "media": {"all": [{"type": "photo", "url": "https://pbs.twimg.com/A.png", "width": 1200, "height": 675}]},
+    "quote": {
+        "url": "https://x.com/fgoproject/status/2122253808327860593",
+        "text": "ピックアップ召喚を開催！\n#FGO",
+        "translation": {"text": "The pickup summon is on!\n#FGO", "source_lang": "ja", "target_lang": "en"},
+        "author": {"screen_name": "fgoproject", "name": "【公式】Fate/Grand Order"},
+    },
+}
+
+
+def test_card_shows_the_quoted_post():
+    tweet = tweetcard.parse(QUOTING)
+    assert tweet is not None and tweet.quote is not None and tweet.translated_from is None
+    text = tweetcard.card_text(tweet)
+    assert text.endswith(
+        "> **[【公式】Fate/Grand Order (@fgoproject)](https://x.com/fgoproject/status/2122253808327860593)**\n"
+        "> ピックアップ召喚を開催！\n"
+        "> \\#FGO"
+    )
+
+
+def test_translated_card_translates_the_tweet_and_its_quote():
+    tweet = tweetcard.parse(QUOTING, translated=True)
+    assert tweet is not None and tweet.translated_from == "ja"
+    text = tweetcard.card_text(tweet)
+    assert "Introducing ★5 (SSR) Dynamite Rikyu!\n-# Translated from ja\n> **" in text
+    assert text.endswith("> The pickup summon is on!\n> \\#FGO")
+
+
+def test_translated_without_a_translation_keeps_the_original():
+    tweet = tweetcard.parse({**QUOTING, "translation": None}, translated=True)
+    assert tweet is not None and tweet.translated_from is None
+    assert tweet.text.startswith("【カルデア広報局より】")
+
+
 def test_card_text_escapes_markdown():
     tweet = tweetcard.Tweet("a_b", "A [b]", "*bold* claim", "", "https://x.com/a_b/status/1", ())
     assert tweetcard.card_text(tweet) == "**[A \\[b\\] (@a_b)](https://x.com/a_b)**\n\\*bold\\* claim"

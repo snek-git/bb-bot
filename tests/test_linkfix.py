@@ -477,6 +477,16 @@ async def test_tweet_with_more_than_four_pictures_gets_bbs_card(h, db, xcard):
     assert h.original == [(500, "suppress")]
 
 
+async def test_tweet_card_offers_translate_for_another_language(h, db, xcard):
+    h.tweet_info = {**fx_tweet(*[(1200, 800)] * 6), "lang": "ja", "text": "今日のイラストです、よろしく"}
+    await h.cog.process(message("https://x.com/a/status/1"))
+    ((view, _),) = xcard.cards
+    assert "bb:tr:0" in views.component_custom_ids(view.children)
+    h.tweet_info = fx_tweet(*[(1200, 800)] * 6)  # English: nothing to translate
+    await h.cog.process(message("https://x.com/a/status/2", mid=501))
+    assert "bb:tr:0" not in views.component_custom_ids(xcard.cards[1][0].children)
+
+
 async def test_strip_row_is_joined_into_one_picture(h, db, xcard):
     xcard.cover = Cover(b"jpeg", "row.jpg")
     h.tweet_info = fx_tweet(*[(52, 1195)] * 17)

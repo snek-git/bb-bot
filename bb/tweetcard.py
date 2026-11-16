@@ -13,6 +13,7 @@ import logging
 import math
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote as quote_path
 
 import aiohttp
 import discord
@@ -29,6 +30,7 @@ PREVIEW_LIMIT = 4  # pictures a fixer's preview shows
 GALLERY_SIZE = 10  # items in one Discord media gallery
 MAX_MEDIA = 40
 TEXT_LIMIT = 1000
+QUOTE_LIMIT = 500
 # A strip row: at least this many pictures, each this many times taller than wide, all about one height.
 STRIP_COUNT = 3
 STRIP_RATIO = 3.0
@@ -52,6 +54,16 @@ class Media:
 
 
 @dataclass(frozen=True)
+class Quote:
+    """The post a tweet quotes: who, what they said, and the link to it."""
+
+    user: str
+    name: str | None
+    text: str
+    url: str
+
+
+@dataclass(frozen=True)
 class Tweet:
     user: str
     name: str | None
@@ -59,6 +71,8 @@ class Tweet:
     stats: str  # "💬 58  🔁 2,370  ❤️ 13,836", or ""
     url: str
     media: tuple[Media, ...]
+    quote: Quote | None = None
+    translated_from: str | None = None  # "ja" (the source language) when text is a translation
 
     @property
     def profile(self) -> str:
@@ -75,12 +89,38 @@ def _stats(tweet: dict[str, Any]) -> str:
     return "  ".join(f"{icon} {count:,}" for icon, count in parts if count)
 
 
-def parse(tweet: dict[str, Any] | None) -> Tweet | None:
-    """The tweet as FxTwitter's API gives it, or None when it has no author or no media."""
+def _translation(tweet: dict[str, Any]) -> dict[str, Any] | None:
+    """FxTwitter's translation of a post fetched with a language, when it has text."""
+    found = tweet.get("translation")
+    return found if isinstance(found, dict) and str(found.get("text") or "").strip() else None
+
+
+def _text(tweet: dict[str, Any], translated: bool) -> str:
+    found = _translation(tweet) if translated else None
+    return str((found or tweet).get("text") or "").strip()
+
+
+def _who(author: dict[str, Any]) -> tuple[str, str | None]:
+    return str(author.get("screen_name") or ""), str(author.get("name") or "").strip() or None
+
+
+def _quote(tweet: dict[str, Any], translated: bool) -> Quote | None:
+    quoted = tweet.get("quote")
+    if not isinstance(quoted, dict):
+        return None
+    user, name = _who(quoted.get("author") or {})
+    url = str(quoted.get("url") or "")
+    if not user or not url.startswith("https://x.com/"):
+        return None
+    return Quote(user, name, _text(quoted, translated), url)
+
+
+def parse(tweet: dict[str, Any] | None, *, translated: bool = False) -> Tweet | None:
+    """The tweet as FxTwitter's API gives it, or None when it has no author or no media. translated: use
+    the translation the API sends when the tweet was fetched with a language (fetch's lang)."""
     if not tweet:
         return None
-    author = tweet.get("author") or {}
-    user = str(author.get("screen_name") or "")
+    user, name = _who(tweet.get("author") or {})
     media: list[Media] = []
     for item in (tweet.get("media") or {}).get("all") or ():
         if not isinstance(item, dict):
@@ -94,9 +134,12 @@ def parse(tweet: dict[str, Any] | None) -> Tweet | None:
     url = str(tweet.get("url") or "")
     if not url.startswith("https://x.com/"):
         url = f"https://x.com/{user}/status/{tweet.get('id')}"
-    name = str(author.get("name") or "").strip() or None
-    text = str(tweet.get("text") or "").strip()
-    return Tweet(user, name, text, _stats(tweet), url, tuple(media[:MAX_MEDIA]))
+    found = _translation(tweet) if translated else None
+    source = (str(found.get("source_lang") or "").strip() or "another language") if found else None
+    return Tweet(
+        user, name, _text(tweet, translated), _stats(tweet), url, tuple(media[:MAX_MEDIA]),
+        quote=_quote(tweet, translated), translated_from=source,
+    )
 
 
 def is_strip_row(media: tuple[Media, ...]) -> bool:
@@ -173,11 +216,16 @@ def pages_of(urls: list[str]) -> list[list[str]]:
     return [urls[start : start + size] for start in range(0, len(urls), size)] or [[]]
 
 
-async def fetch(session: aiohttp.ClientSession, m: LinkMatch) -> dict[str, Any] | None:
-    """The tweet as FxTwitter's API describes it. None if it doesn't answer in time."""
+async def fetch(
+    session: aiohttp.ClientSession, m: LinkMatch, lang: str | None = None
+) -> dict[str, Any] | None:
+    """The tweet as FxTwitter's API describes it. With lang ("en"), it also carries a translation into
+    that language, for the tweet and its quote. None if it doesn't answer in time."""
     if "id" not in m.parts:
         return None
     url = f"https://api.fxtwitter.com/{m.parts.get('user') or 'i'}/status/{m.parts['id']}"
+    if lang:
+        url += f"/{quote_path(lang)}"
     try:
         async with session.get(url, timeout=API_TIMEOUT) as resp:
             if resp.status != 200:
@@ -189,11 +237,24 @@ async def fetch(session: aiohttp.ClientSession, m: LinkMatch) -> dict[str, Any] 
     return tweet if isinstance(tweet, dict) else None
 
 
+def _quote_block(quote: Quote) -> str:
+    """The quoted post as a Discord block quote: who (linking to the post), then what they said."""
+    who = f"{quote.name} (@{quote.user})" if quote.name else f"@{quote.user}"
+    lines = [f"**[{cards.link_text(who)}]({quote.url})**"]
+    if quote.text:
+        lines += discord.utils.escape_markdown(cards.clip(quote.text, QUOTE_LIMIT)).split("\n")
+    return "\n".join(f"> {line}" for line in lines)
+
+
 def card_text(tweet: Tweet) -> str:
     who = f"{tweet.name} (@{tweet.user})" if tweet.name else f"@{tweet.user}"
     lines = [f"**[{cards.link_text(who)}]({tweet.profile})**"]
     if tweet.text:
         lines.append(discord.utils.escape_markdown(cards.clip(tweet.text, TEXT_LIMIT)))
+    if tweet.translated_from:
+        lines.append(f"-# Translated from {tweet.translated_from}")
+    if tweet.quote:
+        lines.append(_quote_block(tweet.quote))
     if tweet.stats:
         lines.append(f"-# {tweet.stats}")
     return "\n".join(lines)

@@ -188,6 +188,13 @@ def test_page_buttons_grey_out_the_way_that_leads_nowhere():
     assert state(2, 3) == [("bb:pg:p:1", "◀", False), ("bb:pg:at", "3/3", True), ("bb:pg:n:2", "▶", True)]
 
 
+def test_current_page_and_translate_from_a_cards_buttons():
+    container = SimpleNamespace(children=[card_buttons("3/4")])  # a card nests its rows in a container
+    assert views.current_page([container]) == 2 and views.has_translate([container])
+    assert views.current_page([]) == 0 and not views.has_translate([])
+    assert views.current_page([card_buttons("x/4")]) == 0
+
+
 def test_has_find_source_walks_action_rows():
     row = SimpleNamespace(
         children=[SimpleNamespace(custom_id="bb:tr:0"), SimpleNamespace(custom_id="bb:src")]
@@ -446,46 +453,98 @@ def _card_pictures(view) -> list[str]:
     return [item.media.url for item in gallery.items]
 
 
-async def test_page_flips_the_tweet_card_for_everyone(db, fake_sites, monkeypatch):
-    await db.insert_repost(make_row(fixer_id=None, quip="a quip"))
-    tweet = {
-        "url": "https://x.com/bb/status/1", "id": "1", "text": "pics", "author": {"screen_name": "bb"},
-        "media": {"all": [{"type": "photo", "url": f"https://pbs.twimg.com/media/{n}.jpg", "width": 900,
-                           "height": 600} for n in range(17)]},
-    }
-    asked = []
+def _card_text(view) -> str:
+    (container,) = [child for child in view.children if isinstance(child, discord.ui.Container)]
+    return container.children[0].content
 
-    async def fetch(session, m):
-        asked.append(m.url)
-        return tweet
+
+CARD_TWEET = {
+    "url": "https://x.com/bb/status/1", "id": "1", "text": "絵です", "author": {"screen_name": "bb"},
+    "translation": {"text": "It's a drawing", "source_lang": "ja", "target_lang": "en"},
+    "media": {"all": [{"type": "photo", "url": f"https://pbs.twimg.com/media/{n}.jpg", "width": 900,
+                       "height": 600} for n in range(17)]},
+}
+
+
+@pytest.fixture
+def card_api(monkeypatch):
+    """FxTwitter's answer for a 17-picture tweet card (None = no answer), and the languages asked for."""
+    state = SimpleNamespace(tweet=CARD_TWEET, langs=[])
+
+    async def fetch(session, m, lang=None):
+        state.langs.append(lang)
+        return state.tweet
 
     monkeypatch.setattr(tweetcard, "fetch", fetch)
+    return state
+
+
+def card_bot(db):
     bot = make_bot(db)
     bot.http_client = None
-    interaction = make_interaction(message=make_message())
+    return bot
+
+
+def card_interaction(*components):
+    interaction = make_interaction(message=make_message(components=components))
     interaction.edit_original_response = AsyncMock()
-    await buttons.Buttons(bot).on_page(interaction, 1)
-    assert interaction.response.names == ["defer"] and asked == ["https://x.com/bb/status/1"]
+    return interaction
+
+
+def card_buttons(page_label: str, translate_id: str = "bb:tr:0"):
+    """A sent card's buttons as Discord gives them back: the "2/2" between the arrows, and Translate."""
+    return SimpleNamespace(children=[
+        SimpleNamespace(custom_id=views.PAGE_AT_ID, label=page_label),
+        SimpleNamespace(custom_id=translate_id, label="Translate"),
+    ])
+
+
+async def test_page_flips_the_tweet_card_for_everyone(db, fake_sites, card_api):
+    await db.insert_repost(make_row(fixer_id=None, quip="a quip"))
+    interaction = card_interaction(card_buttons("1/2"))
+    await buttons.Buttons(card_bot(db)).on_page(interaction, 1)
+    assert interaction.response.names == ["defer"] and card_api.langs == [None]
     view = interaction.edit_original_response.await_args.kwargs["view"]
     assert _card_pictures(view) == [f"https://pbs.twimg.com/media/{n}.jpg" for n in range(9, 17)]
     assert view.children[0].content == "-# a quip"  # the card keeps its line
-    assert views.PAGE_AT_ID in views.component_custom_ids(view.children)
+    assert "絵です" in _card_text(view)
+    ids = views.component_custom_ids(view.children)
+    assert views.PAGE_AT_ID in ids and "bb:tr:0" in ids  # Translate stays offered
 
 
-async def test_page_without_an_api_answer_is_an_ephemeral_error(db, fake_sites, monkeypatch):
+async def test_page_keeps_a_translated_card_translated(db, fake_sites, card_api):
+    await db.insert_repost(make_row(fixer_id=None, translated=True))
+    await SettingsStore(db).update(1, translate_lang="en")
+    interaction = card_interaction(card_buttons("2/2", "bb:tr:1"))
+    await buttons.Buttons(card_bot(db)).on_page(interaction, 0)
+    view = interaction.edit_original_response.await_args.kwargs["view"]
+    assert card_api.langs == ["en"] and "It's a drawing" in _card_text(view)
+    assert "bb:tr:1" in views.component_custom_ids(view.children)  # still says Original
+
+
+async def test_translate_rebuilds_a_tweet_card_on_its_page(db, fake_sites, card_api):
     await db.insert_repost(make_row(fixer_id=None))
+    await SettingsStore(db).update(1, translate_lang="en")
+    interaction = card_interaction(card_buttons("2/2"))
+    await buttons.Buttons(card_bot(db)).on_translate(interaction, False)
+    view = interaction.edit_original_response.await_args.kwargs["view"]
+    assert card_api.langs == ["en"]
+    assert "It's a drawing\n-# Translated from ja" in _card_text(view)
+    assert _card_pictures(view)[0] == "https://pbs.twimg.com/media/9.jpg"  # still on page 2
+    assert "bb:tr:1" in views.component_custom_ids(view.children)
+    assert (await db.get_repost(500)).translated is True
+    await buttons.Buttons(card_bot(db)).on_translate(card_interaction(card_buttons("2/2", "bb:tr:1")), True)
+    assert card_api.langs == ["en", None] and (await db.get_repost(500)).translated is False
 
-    async def fetch(session, m):
-        return None
 
-    monkeypatch.setattr(tweetcard, "fetch", fetch)
-    bot = make_bot(db)
-    bot.http_client = None
-    interaction = make_interaction(message=make_message())
-    interaction.edit_original_response = AsyncMock()
-    await buttons.Buttons(bot).on_page(interaction, 1)
+async def test_page_without_an_api_answer_is_an_ephemeral_error(db, fake_sites, card_api):
+    await db.insert_repost(make_row(fixer_id=None, translated=True))
+    card_api.tweet = None
+    interaction = card_interaction(card_buttons("1/2"))
+    await buttons.Buttons(card_bot(db)).on_translate(interaction, True)
     interaction.edit_original_response.assert_not_awaited()
     assert interaction.followup.send.await_args.kwargs["ephemeral"] is True
+    assert (await db.get_repost(500)).translated is True  # nothing changed
 
 
 async def test_translate_without_row_is_an_ephemeral_error(db, fake_sites):

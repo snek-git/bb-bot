@@ -63,6 +63,11 @@ def translated_text(
     return text, fixer, quip
 
 
+def is_tweet_card(row: RepostRow) -> bool:
+    """BB's own card for a tweet, not a fixer link: settled with no fixer, and not an upload."""
+    return row.site == "twitter" and row.fixer_id is None and row.status == "ok"
+
+
 def _thread_of(channel: Any) -> Any:
     """thread= for webhook calls: the thread when the repost lives in one, else MISSING."""
     return discord.Object(channel.id) if isinstance(channel, discord.Thread) else discord.utils.MISSING
@@ -184,6 +189,11 @@ class Buttons(commands.Cog):
             return
         translate = not row.translated
         settings = await self.bot.settings.get(row.guild_id)
+        if is_tweet_card(row):
+            page = views.current_page(message.components)
+            if await self._show_card(interaction, row, page=page, translated=translate, has_translate=True):
+                await self.bot.db.update_repost(message.id, translated=translate)
+            return
         try:
             text, fixer, quip = translated_text(row, translate, settings.translate_lang, self.bot.down_fixers)
         except LookupError as exc:
@@ -229,29 +239,54 @@ class Buttons(commands.Cog):
     # --- tweet card pages ---------------------------------------------------------------
 
     async def on_page(self, interaction: discord.Interaction, page: int) -> None:
-        """Flip a tweet card to another page of pictures, for everyone. The card is rebuilt from FxTwitter's
-        API, so nothing about it has to be stored."""
+        """Flip a tweet card to another page of pictures, for everyone. It stays translated if it was."""
         message = interaction.message
         if message is None:
             return
         row = await self.bot.db.get_repost(message.id)
-        match = sites.match(row.original_url, spoiler=row.spoiler) if row is not None else None
-        if row is None or match is None:
+        if row is None:
             await interaction.response.send_message(strings.line("error.generic"), ephemeral=True)
             return
+        offered = views.has_translate(message.components)
+        await self._show_card(interaction, row, page=page, translated=row.translated, has_translate=offered)
+
+    async def _show_card(
+        self,
+        interaction: discord.Interaction,
+        row: RepostRow,
+        *,
+        page: int,
+        translated: bool,
+        has_translate: bool,
+    ) -> bool:
+        """Rebuild a tweet card from FxTwitter's API (nothing about it is stored) at a page, translated or
+        not, and put it in place of the clicked one. False, with a private error, when that fails."""
+        match = sites.match(row.original_url, spoiler=row.spoiler)
+        if match is None:
+            await interaction.response.send_message(strings.line("error.generic"), ephemeral=True)
+            return False
         await interaction.response.defer()  # the API answer can take longer than Discord waits
-        tweet = tweetcard.parse(await tweetcard.fetch(self.bot.http_client, match))
+        lang = (await self.bot.settings.get(row.guild_id)).translate_lang if translated else None
+        data = await tweetcard.fetch(self.bot.http_client, match, lang)
+        tweet = tweetcard.parse(data, translated=translated)
         if tweet is None:
-            log.warning("page %s of repost %s: no answer from FxTwitter", page, message.id)
+            log.warning("tweet card %s: no answer from FxTwitter", row.repost_id)
             await interaction.followup.send(strings.line("error.generic"), ephemeral=True)
-            return
-        buttons = views.repost_buttons(origin_author_id=row.origin_author_id, has_image=False)
+            return False
+        buttons = views.repost_buttons(
+            origin_author_id=row.origin_author_id,
+            has_image=False,
+            translatable=has_translate,
+            translated=translated,
+        )
         view = tweetcard.build_card(tweet, match, buttons=buttons, quip=row.quip, page=page)
         try:
             await interaction.edit_original_response(view=view)
         except discord.HTTPException:
-            log.exception("flipping repost %s to page %s failed", message.id, page)
+            log.exception("rebuilding tweet card %s (page %s) failed", row.repost_id, page)
             await interaction.followup.send(strings.line("error.generic"), ephemeral=True)
+            return False
+        return True
 
     # --- find source --------------------------------------------------------------------
 
