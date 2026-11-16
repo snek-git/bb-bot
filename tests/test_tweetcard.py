@@ -60,6 +60,9 @@ def test_strip_row():
     assert tweetcard.is_strip_row(media((100, 1200), (110, 1180), (90, 1200)))  # about one height
     assert not tweetcard.is_strip_row(media(*[(52, 1195)] * 2))  # two sit side by side anyway
     assert not tweetcard.is_strip_row(media(*[(1080, 2340)] * 3))  # phone screenshots aren't strips
+    # A real tweet (2026-11): strips with one wider panel where the drawing "slips off the screen".
+    assert tweetcard.is_strip_row(media(*[(122, 1920)] * 7, (971, 1920), *[(122, 1920)] * 3))
+    assert not tweetcard.is_strip_row(media((52, 1195), (900, 1195), (900, 1195)))  # mostly not strips
     assert not tweetcard.is_strip_row(media((52, 1195), (52, 1195), (52, 600)))  # heights differ
     assert not tweetcard.is_strip_row(media(*[(52, 1195)] * 3, video=True))
     assert not tweetcard.is_strip_row(media(*[(300, 1000)] * 12))  # joined, 3.6 times wider than tall

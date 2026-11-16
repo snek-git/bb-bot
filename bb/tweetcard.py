@@ -95,11 +95,13 @@ def parse(tweet: dict[str, Any] | None) -> Tweet | None:
 
 
 def is_strip_row(media: tuple[Media, ...]) -> bool:
-    """Pictures meant to sit side by side: 3 or more, no videos, all tall and thin, all about one height,
-    and not so many that the joined row comes out wider than STRIP_MAX_WIDE heights."""
+    """Pictures meant to sit side by side: 3 or more, no videos, all about one height, at least half of
+    them tall and thin (a wider panel among the strips is part of the picture), and not so many that the
+    joined row comes out wider than STRIP_MAX_WIDE heights."""
     if len(media) < STRIP_COUNT or any(item.video or not item.width for item in media):
         return False
-    if any(item.height < item.width * STRIP_RATIO for item in media):
+    strips = sum(item.height >= item.width * STRIP_RATIO for item in media)
+    if strips * 2 < len(media):
         return False
     tallest = max(item.height for item in media)
     if any(item.height < tallest * (1 - STRIP_HEIGHT_SPREAD) for item in media):
