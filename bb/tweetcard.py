@@ -33,7 +33,9 @@ STRIP_RATIO = 3.0
 STRIP_HEIGHT_SPREAD = 0.05
 STRIP_MAX_WIDE = 3.0  # a joined row wider than this many heights shows as a sliver: galleries instead
 STRIP_MAX_HEIGHT = 2000
-STRIP_FILENAME = "row.jpg"
+# The see-through gap between joined pictures, as X shows them: Discord's background shows through.
+STRIP_GAP = 1 / 200  # of the row's height
+STRIP_FILENAME = "row.webp"
 MEDIA_HOST = "https://pbs.twimg.com/"
 FETCH_TIMEOUT = aiohttp.ClientTimeout(total=15)
 
@@ -115,20 +117,23 @@ def wants_card(tweet: Tweet) -> bool:
 
 
 def stitch(images: list[bytes]) -> bytes:
-    """The pictures side by side, scaled to the shortest one's height (at most STRIP_MAX_HEIGHT), as JPEG."""
+    """The pictures side by side with see-through gaps, scaled to the shortest one's height (at most
+    STRIP_MAX_HEIGHT), as WebP (JPEG has no transparency, and PNG is too big for photos)."""
     opened = [Image.open(io.BytesIO(data)) for data in images]
     height = min(STRIP_MAX_HEIGHT, *(image.height for image in opened))
+    gap = max(2, round(height * STRIP_GAP))
     scaled = []
     for image in opened:
         width = max(1, round(image.width * height / image.height))
-        scaled.append(image.convert("RGB").resize((width, height), Image.LANCZOS))
-    row = Image.new("RGB", (sum(image.width for image in scaled), height), "white")
+        scaled.append(image.convert("RGBA").resize((width, height), Image.LANCZOS))
+    width = sum(image.width for image in scaled) + gap * (len(scaled) - 1)
+    row = Image.new("RGBA", (width, height), (0, 0, 0, 0))
     x = 0
     for image in scaled:
         row.paste(image, (x, 0))
-        x += image.width
+        x += image.width + gap
     out = io.BytesIO()
-    row.save(out, "JPEG", quality=92)
+    row.save(out, "WEBP", quality=90)
     return out.getvalue()
 
 

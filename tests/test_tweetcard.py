@@ -83,17 +83,20 @@ def _jpeg(width: int, height: int, colour: str) -> bytes:
     return out.getvalue()
 
 
-def test_stitch_puts_pictures_side_by_side():
+def test_stitch_puts_pictures_side_by_side_with_see_through_gaps():
     row = Image.open(io.BytesIO(tweetcard.stitch([_jpeg(52, 1195, "red"), _jpeg(52, 1195, "blue")] * 2)))
-    assert row.size == (208, 1195) and row.format == "JPEG"
-    assert row.getpixel((26, 600))[0] > 200 and row.getpixel((78, 600))[2] > 200
+    assert row.size == (4 * 52 + 3 * 6, 1195) and row.format == "WEBP"  # a 6px gap at 1195 tall
+    red, gap, blue = (row.convert("RGBA").getpixel((x, 600)) for x in (26, 55, 84))
+    assert red[0] > 200 and red[3] == 255
+    assert gap[3] == 0
+    assert blue[2] > 200 and blue[3] == 255
 
 
 def test_stitch_scales_to_the_shortest_and_caps_the_height():
     row = Image.open(io.BytesIO(tweetcard.stitch([_jpeg(100, 1000, "red"), _jpeg(200, 2000, "blue")])))
-    assert row.size == (200, 1000)
+    assert row.size == (200 + 5, 1000)
     tall = Image.open(io.BytesIO(tweetcard.stitch([_jpeg(300, 3000, "red"), _jpeg(300, 3000, "blue")])))
-    assert tall.size == (400, 2000)
+    assert tall.size == (400 + 10, 2000)
 
 
 def _galleries(view: discord.ui.LayoutView) -> list[list[str]]:
@@ -116,8 +119,8 @@ def test_card_shows_every_picture_ten_to_a_gallery():
 def test_card_with_a_joined_row_shows_only_that():
     tweet = tweetcard.parse(SPINES)
     assert tweet is not None
-    view = tweetcard.build_card(tweet, MATCH, buttons=[], cover=tweetcard.Cover(b"x", "row.jpg"), quip="hi")
-    assert _galleries(view) == [["attachment://row.jpg"]]
+    view = tweetcard.build_card(tweet, MATCH, buttons=[], cover=tweetcard.Cover(b"x", "row.webp"), quip="hi")
+    assert _galleries(view) == [["attachment://row.webp"]]
     assert isinstance(view.children[0], discord.ui.TextDisplay) and view.children[0].content == "-# hi"
 
 
