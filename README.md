@@ -29,7 +29,7 @@ The idea comes from [FixTweetBot](https://github.com/Kyrela/FixTweetBot) (MIT + 
    - Under **Privileged Gateway Intents**, turn on **Message Content Intent**. Without it BB sees every message as empty and fixes nothing. Presence and Server Members intents are not needed.
    - Optional: turn off **Public Bot** so only you can add her to servers.
 3. **Installation** tab: under Installation Contexts, keep **Guild Install** and untick **User Install**.
-4. Optional, **Emojis** tab: upload custom emojis named `bb_smug`, `bb_annoyed` and `bb_wink`, then copy each one's markup (`<:bb_smug:123456789012345678>`) into `.env`. Unset ones are simply left out of her lines. App emojis work in every server without extra permissions.
+4. Optional, **Emojis** tab: upload custom emojis named `bb_smug`, `bb_annoyed` and `bb_wink`, then copy each one's markup (`<:bb_smug:123456789012345678>`) into `.env`. Unset ones are simply left out of her lines. An emoji named `bb_twitter` is the icon in the "BBTwitter" footer of her tweet cards; she finds that one by name at startup, so it needs no `.env` line. App emojis work in every server without extra permissions.
 5. Copy the **Application ID** from **General Information**.
 
 ### Invite her

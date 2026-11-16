@@ -214,6 +214,19 @@ def test_translated_without_a_translation_keeps_the_original():
     assert tweet.text.startswith("【カルデア広報局より】")
 
 
+def test_footer_names_bbtwitter_with_her_icon_and_the_post_time(monkeypatch):
+    tweet = tweetcard.parse({**SPINES, "created_timestamp": 1794763376})
+    assert tweet is not None and tweet.posted == 1794763376
+    assert tweetcard.footer(tweet) == "-# BBTwitter · <t:1794763376:f>"  # no icon uploaded
+    monkeypatch.setattr(tweetcard, "_icon", "<:bb_twitter:1572020420851404921>")
+    assert tweetcard.footer(tweet) == "-# <:bb_twitter:1572020420851404921> BBTwitter · <t:1794763376:f>"
+    no_time = tweetcard.parse(SPINES)
+    assert no_time is not None and tweetcard.footer(no_time).endswith("> BBTwitter")
+    (container,) = tweetcard.build_card(tweet, MATCH, buttons=[]).children
+    texts = [child.content for child in container.children if isinstance(child, discord.ui.TextDisplay)]
+    assert texts[-1] == tweetcard.footer(tweet)  # under the pictures, above the buttons
+
+
 def test_card_text_escapes_markdown():
     tweet = tweetcard.Tweet("a_b", "A [b]", "*bold* claim", "", "https://x.com/a_b/status/1", ())
     assert tweetcard.card_text(tweet) == "**[A \\[b\\] (@a_b)](https://x.com/a_b)**\n\\*bold\\* claim"

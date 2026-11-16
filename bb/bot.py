@@ -8,7 +8,7 @@ import aiohttp
 import discord
 from discord.ext import commands
 
-from bb import nhentai, render, strings, upload
+from bb import nhentai, render, strings, tweetcard, upload
 from bb.config import Config
 from bb.db import Database
 from bb.settings_store import SettingsStore
@@ -87,6 +87,17 @@ class BBBot(commands.Bot):
         else:
             synced = await self.tree.sync()
             log.info("synced %d global commands", len(synced))
+        await self._load_app_emojis()
+
+    async def _load_app_emojis(self) -> None:
+        """The app's own emojis (Developer Portal -> Emojis) BB looks up by name: the tweet card's icon."""
+        try:
+            emojis = {emoji.name: str(emoji) for emoji in await self.fetch_application_emojis()}
+        except discord.HTTPException as exc:
+            log.warning("couldn't fetch the app's emojis: %s", exc)
+            return
+        tweetcard.set_icon(emojis.get(tweetcard.ICON_EMOJI))
+        log.info("app emojis: %s", ", ".join(sorted(emojis)) or "none")
 
     async def on_message(self, message: discord.Message) -> None:
         # Deliberately empty: BB has no text commands. Cogs listen to on_message themselves.

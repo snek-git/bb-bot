@@ -46,6 +46,17 @@ STRIP_MAX_HEIGHT = 2000
 STRIP_GAP = 1 / 200  # of the row's height
 STRIP_FILENAME = "row.webp"
 MEDIA_HOST = "https://pbs.twimg.com/"
+# The card's footer, where a fixer's preview says "FxTwitter": BB's name and her app emoji of that name
+# (Developer Portal -> Emojis), looked up at startup. Without the emoji the footer is just the name.
+ICON_NAME = "BBTwitter"
+ICON_EMOJI = "bb_twitter"
+_icon: str | None = None
+
+
+def set_icon(markup: str | None) -> None:
+    """Called once at startup with the app emoji's markup (<:bb_twitter:123>), or None when it's missing."""
+    global _icon
+    _icon = markup
 FETCH_TIMEOUT = aiohttp.ClientTimeout(total=15)
 API_TIMEOUT = aiohttp.ClientTimeout(total=3)
 
@@ -78,6 +89,7 @@ class Tweet:
     media: tuple[Media, ...]
     quote: Quote | None = None
     translated_from: str | None = None  # "ja" (the source language) when text is a translation
+    posted: int = 0  # when it was posted, as a Unix timestamp; 0 when the API didn't say
 
     @property
     def profile(self) -> str:
@@ -157,7 +169,7 @@ def parse(tweet: dict[str, Any] | None, *, translated: bool = False) -> Tweet | 
     source = (str(found.get("source_lang") or "").strip() or "another language") if found else None
     return Tweet(
         user, name, _text(tweet, translated), _stats(tweet), url, tuple(media[:MAX_MEDIA]),
-        quote=_quote(tweet, translated), translated_from=source,
+        quote=_quote(tweet, translated), translated_from=source, posted=_int(tweet.get("created_timestamp")),
     )
 
 
@@ -288,6 +300,14 @@ def _quote_block(quote: Quote) -> str:
     return "\n".join(f"> {line}" for line in lines)
 
 
+def footer(tweet: Tweet) -> str:
+    """"<icon> BBTwitter · <when it was posted>", the time in each reader's own timezone."""
+    parts = [f"{_icon} {ICON_NAME}" if _icon else ICON_NAME]
+    if tweet.posted:
+        parts.append(f"<t:{tweet.posted}:f>")
+    return "-# " + " · ".join(parts)
+
+
 def card_text(tweet: Tweet) -> str:
     who = f"{tweet.name} (@{tweet.user})" if tweet.name else f"@{tweet.user}"
     lines = [f"**[{cards.link_text(who)}]({tweet.profile})**"]
@@ -311,9 +331,9 @@ def build_card(
     cover: Cover | None = None,
     page: int = 0,
 ) -> discord.ui.LayoutView:
-    """Components V2 card: the author and text, the media, then the link and BB's buttons. The media is the
-    joined strip row when there's a cover, else one page of the pictures with ◀ 1/2 ▶ under it when
-    there's more than one page."""
+    """Components V2 card: the author and text, the media, the BBTwitter footer, then the link and BB's
+    buttons. The media is the joined strip row when there's a cover, else one page of the pictures with
+    ◀ 1/2 ▶ under it when there's more than one page."""
     view = discord.ui.LayoutView(timeout=None)
     if quip:
         view.add_item(discord.ui.TextDisplay(f"-# {quip}"))
@@ -325,6 +345,7 @@ def build_card(
     container.add_item(discord.ui.MediaGallery(*items))
     if len(pages) > 1:
         container.add_item(discord.ui.ActionRow(*views.page_buttons(page, len(pages))))
+    container.add_item(discord.ui.TextDisplay(footer(tweet)))
     link = discord.ui.Button(label="Open on X", url=tweet.url)
     container.add_item(discord.ui.ActionRow(link, *buttons))
     view.add_item(container)
