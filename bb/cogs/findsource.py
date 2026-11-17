@@ -81,25 +81,24 @@ def _gallery_images(components: Iterable[Any]) -> Iterable[str]:
         yield from _gallery_images(getattr(component, "children", None) or ())
 
 
+def image_urls(
+    attachments: Iterable[Any], embeds: Iterable[Any], components: Iterable[Any] = ()
+) -> list[str]:
+    """Every image on a message, once each: image attachments, card galleries, then embed images and
+    thumbnails."""
+    embeds = list(embeds)
+    found = [attachment.url for attachment in attachments if _is_image_attachment(attachment)]
+    found.extend(_gallery_images(components))
+    for part in ("image", "thumbnail"):
+        found.extend(getattr(getattr(embed, part, None), "url", None) for embed in embeds)
+    return list(dict.fromkeys(url for url in found if url))
+
+
 def pick_image_url(
     attachments: Iterable[Any], embeds: Iterable[Any], components: Iterable[Any] = ()
 ) -> str | None:
-    """The first image on a message: image attachments, card galleries, then embed images and thumbnails."""
-    for attachment in attachments:
-        if _is_image_attachment(attachment):
-            return attachment.url
-    for url in _gallery_images(components):
-        return url
-    embeds = list(embeds)
-    for embed in embeds:
-        url = getattr(getattr(embed, "image", None), "url", None)
-        if url:
-            return url
-    for embed in embeds:
-        url = getattr(getattr(embed, "thumbnail", None), "url", None)
-        if url:
-            return url
-    return None
+    """The first image on a message (see image_urls for the order)."""
+    return next(iter(image_urls(attachments, embeds, components)), None)
 
 
 def _source_name(index_name: str, url: str) -> str:

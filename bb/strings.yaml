@@ -155,6 +155,22 @@ findsource.paused:
   lines:
     - "BB is taking a break right now. Go bother the admins, not me♡"
 
+# /copy. Only the person who used it sees these.
+copy.done:
+  vars: [n]
+  lines:
+    - "The last {n} messages, Senpai. Open it and copy away. The image links stop working in about a day♡"
+
+copy.cooldown:
+  vars: []
+  lines:
+    - "BB just copied a whole channel for you. Wait a few seconds, greedy Senpai☆"
+
+copy.forbidden:
+  vars: []
+  lines:
+    - "BB isn't allowed to read this channel's history. Ask the admins, Senpai."
+
 alert.fixer_down:
   vars: [fixer, site, backup]
   lines:

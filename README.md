@@ -17,6 +17,7 @@ What she does:
 - Rotating status text with the number of links fixed in the last 24 hours
 - A weekly roundup: top poster, top site, and the Buster Brainlet of the week
 - FGO JP news from Atlas Academy's data: new events (with a link to their official news page) and banners (with their pickups and banner art), and text-only reminders 2 days and 1 day before they end, posted as replies to the start post. Also podless Grand Duel, 0 AP and Great Success x3+ campaigns, and shop resets (Mana Prism, Rare Prism, craftable grails, Hellish Ordeal and its shop) a day before and when they happen. Official "coming soon" announcements are posted too, translated into English by Claude Code when it's installed and logged in (on mc-server, hermes's, through `compose.claude.yml`). Ping her with `gre new` in any channel to see what's on right now
+- `/copy 500` sends you, privately, a text file of the channel's last 500 messages (up to 1000) with every image link under its message. Open it and copy. Links to uploads stop working after about a day
 - `/settings`, visible only to members with Manage Server
 
 The idea comes from [FixTweetBot](https://github.com/Kyrela/FixTweetBot) (MIT + Commons Clause). BB is a fresh rewrite and shares no code with it.
@@ -180,6 +181,7 @@ Run through this in a test server (set `DEV_GUILD_ID` so commands show up instan
 
 **Admin and background**
 - [ ] `/settings` is invisible to the non-admin account and works for an admin; changes stick after a restart.
+- [ ] `/copy 50` answers only you with a text file of the last 50 messages, oldest first, with image links under their messages.
 - [ ] The status text appears under BB's name and changes every 30 minutes.
 - [ ] Roundup: set the roundup channel with the weekday and hour set to the current hour (in the server's timezone). Within 5 minutes the weekly report appears, once; restarting her doesn't post it again.
 - [ ] Ping BB with no link: she answers. Ping her with "help": she explains herself.
