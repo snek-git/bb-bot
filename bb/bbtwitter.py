@@ -9,10 +9,15 @@ here. Everything else (video player, GIFs, polls, quotes, translation) is FxTwit
 
 Only tweet-shaped paths are passed on, so this is never an open proxy. Browsers get FxTwitter's redirect to
 x.com, as they would on fxtwitter.com.
+
+FxTwitter sometimes answers a post that exists with its "This post is unavailable :(" page (seen 2026-11 on
+NSFW posts, about one fetch in five). Discord keeps whatever preview it gets first, so that page is asked for
+again, and if it sticks BB answers 502: Discord shows no preview and BB moves on to the next fixer.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -31,6 +36,8 @@ PORT = 8091
 ICON_PATH = "/icon.png"
 ICON_FILE = Path(__file__).parent / "assets" / "bbtwitter.png"
 TIMEOUT = aiohttp.ClientTimeout(total=10)
+TRIES = 3
+RETRY_DELAY = 0.5
 
 # What Discord may ask for: a tweet page (with /photo/N, /video/N or a language after it), the oEmbed
 # file, the activity object and the Mastodon API status. Anything else is a 404.
@@ -46,6 +53,12 @@ _FORWARDED = ("User-Agent", "Accept", "Accept-Language")
 _SITE_NAME = re.compile(r'(<meta property="og:site_name" content=")[^"]*(")')
 _ICONS = re.compile(r"<link href='[^']*' rel='icon'[^>]*>")
 _ICON_LINK = f"<link href='{BASE}{ICON_PATH}' rel='icon' sizes='128x128' type='image/png'>"
+_UNAVAILABLE = '<meta property="og:description" content="This post is unavailable :("/>'
+
+
+def unavailable(content_type: str, body: str) -> bool:
+    """Whether FxTwitter answered with its "This post is unavailable" page instead of the post."""
+    return content_type.startswith("text/html") and _UNAVAILABLE in body
 
 
 def rebrand_page(html: str) -> str:
@@ -99,20 +112,31 @@ class Server:
     async def icon(self, request: web.Request) -> web.StreamResponse:
         return web.FileResponse(ICON_FILE, headers={"Cache-Control": "public, max-age=86400"})
 
+    async def fetch(self, url: str, headers: dict[str, str]) -> tuple[int, str, str | None, str]:
+        """FxTwitter's answer: status, content type, redirect target and body."""
+        async with self.session.get(url, headers=headers, allow_redirects=False, timeout=TIMEOUT) as resp:
+            return resp.status, resp.content_type, resp.headers.get("Location"), await resp.text()
+
     async def relay(self, request: web.Request) -> web.StreamResponse:
         path = request.path
         if not _PASSED.fullmatch(path):
             raise web.HTTPNotFound()
         headers = {name: request.headers[name] for name in _FORWARDED if name in request.headers}
         url = f"{UPSTREAM}{path}" + (f"?{request.query_string}" if request.query_string else "")
-        try:
-            async with self.session.get(url, headers=headers, allow_redirects=False, timeout=TIMEOUT) as resp:
-                status, content_type = resp.status, resp.content_type
-                location = resp.headers.get("Location")
-                body = await resp.text()
-        except (aiohttp.ClientError, TimeoutError) as exc:
-            log.warning("BBTwitter: %s failed upstream: %r", path, exc)
-            raise web.HTTPBadGateway() from exc
+        for attempt in range(1, TRIES + 1):
+            try:
+                status, content_type, location, body = await self.fetch(url, headers)
+            except (aiohttp.ClientError, TimeoutError) as exc:
+                log.warning("BBTwitter: %s failed upstream: %r", path, exc)
+                raise web.HTTPBadGateway() from exc
+            if not unavailable(content_type, body):
+                break
+            log.info("BBTwitter: FxTwitter called %s unavailable (try %d of %d)", path, attempt, TRIES)
+            if attempt < TRIES:
+                await asyncio.sleep(RETRY_DELAY)
+        else:
+            log.warning("BBTwitter: FxTwitter kept calling %s unavailable, answering 502", path)
+            raise web.HTTPBadGateway()
         if location and 300 <= status < 400:
             return web.Response(status=status, headers={"Location": location})
         try:

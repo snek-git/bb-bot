@@ -9,6 +9,8 @@ from aiohttp.test_utils import TestClient, TestServer
 from bb import bbtwitter
 from bb.links import sites
 
+Answer = tuple[int, str, str, "str | None"]
+
 # FxTwitter's preview page for a real tweet (2026-11), as Discord gets it, trimmed of its ASCII-art banner.
 PAGE = (
     '<!DOCTYPE html><html lang="en"><head>'
@@ -28,6 +30,12 @@ OEMBED = {
     "author_name": "💬 5   🔁 2.4K", "author_url": "https://x.com/linluyun_rin/status/2122140096984215569",
     "provider_name": "FxTwitter", "provider_url": "https://github.com/FxEmbed/FxEmbed", "type": "rich",
 }
+# FxTwitter's answer when it fails to fetch a post that exists (2026-11), banner trimmed.
+UNAVAILABLE = (
+    '<!DOCTYPE html><html ><head><meta property="og:title" content="FxTwitter"/>'
+    '<meta property="og:description" content="This post is unavailable :("/>'
+    '<meta property="theme-color" content="#6363ff"/></head><body></body></html>'
+)
 STATUS = {"id": "2122140096984215569", "media_attachments": [
     {"type": "image", "url": "https://gif.fxtwitter.com/tweet_video/HXNbE-kaYAEP6_o.webp"}]}
 
@@ -68,17 +76,21 @@ def test_bbtwitter_leads_the_tweet_chain_with_fxtwitters_media_links():
 
 
 class FakeUpstream:
-    """FxTwitter, answering from a table: path -> (status, content type, body, location)."""
+    """FxTwitter, answering from a table: path -> (status, content type, body, location). A list of answers
+    is given out one per request, the last one repeating."""
 
     def __init__(self) -> None:
         self.asked: list[tuple[str, dict[str, str]]] = []
         self.app = web.Application()
         self.app.router.add_get("/{path:.*}", self.answer)
-        self.table: dict[str, tuple[int, str, str, str | None]] = {}
+        self.table: dict[str, Answer | list[Answer]] = {}
 
     async def answer(self, request: web.Request) -> web.StreamResponse:
         self.asked.append((request.path_qs, dict(request.headers)))
-        status, content_type, body, location = self.table.get(request.path, (404, "text/plain", "nope", None))
+        entry = self.table.get(request.path, (404, "text/plain", "nope", None))
+        if isinstance(entry, list):
+            entry = entry.pop(0) if len(entry) > 1 else entry[0]
+        status, content_type, body, location = entry
         headers = {"Location": location} if location else {}
         return web.Response(status=status, text=body, content_type=content_type, headers=headers)
 
@@ -89,6 +101,7 @@ async def bbx(monkeypatch):
     up = TestServer(upstream.app)
     await up.start_server()
     monkeypatch.setattr(bbtwitter, "UPSTREAM", str(up.make_url("")).rstrip("/"))
+    monkeypatch.setattr(bbtwitter, "RETRY_DELAY", 0)
     async with TestClient(TestServer(web.Application())) as plain:  # just for its session
         server = bbtwitter.Server(plain.session)
         async with TestClient(TestServer(server.app)) as client:
@@ -128,3 +141,19 @@ async def test_serves_the_icon_and_refuses_anything_not_tweet_shaped(bbx):
     for path in ("/", "/robots.txt", "/a/status/1/../../admin", "/http://evil.example/"):
         assert (await client.get(path)).status == 404
     assert upstream.asked == []  # never passed on
+
+
+async def test_asks_again_when_fxtwitter_calls_a_post_unavailable(bbx):
+    upstream, client = bbx
+    upstream.table["/a/status/1"] = [(200, "text/html", UNAVAILABLE, None), (200, "text/html", PAGE, None)]
+    resp = await client.get("/a/status/1", headers={"User-Agent": "Discordbot/2.0"})
+    assert resp.status == 200 and 'content="BBTwitter"' in await resp.text()
+    assert len(upstream.asked) == 2
+
+
+async def test_answers_502_when_fxtwitter_keeps_calling_a_post_unavailable(bbx):
+    upstream, client = bbx
+    upstream.table["/a/status/1"] = (200, "text/html", UNAVAILABLE, None)
+    resp = await client.get("/a/status/1", headers={"User-Agent": "Discordbot/2.0"})
+    assert resp.status == 502
+    assert len(upstream.asked) == bbtwitter.TRIES
